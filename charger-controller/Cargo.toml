@@ -1,0 +1,33 @@
+[package]
+name = "charger-controller"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "charger-controller"
+path = "src/main.rs"
+
+[dependencies]
+mc5000-protocol = { path = "../mc5000-protocol" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+btleplug = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+
+# GUI dependencies
+iced = { version = "0.12", features = ["tokio", "advanced"] }
+plotters-iced = "0.10"
+rfd = "0.14"
+image = "0.24"
+env_logger = "0.11"
+
+# Data export
+csv = "1.3"

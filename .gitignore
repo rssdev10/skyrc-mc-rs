@@ -1,0 +1,61 @@
+# Build artifacts
+/target/
+
+# Cargo/Rust artifacts
+**/target/
+**/*.rlib
+**/*.rmeta
+
+# IDE files
+/.vscode/
+/.idea/
+*.sublime-workspace
+*.swp
+*.swo
+*.bak
+*~
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Log files
+*.log
+coverage/
+
+# Executables and debug symbols
+*.exe
+*.dll
+*.so
+*.dylib
+*.dSYM
+
+# Python
+__pycache__/
+*.py
+
+# Node
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# Data files (ignore large generated data by default)
+*.csv
+charger_data.csv
+
+# Local configuration
+config.toml
+settings.json
+
+# Misc
+*.tmp
+*.cache
+
+**/tmp
+*.zip
+*.app
+**/logs

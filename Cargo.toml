@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "mc5000-protocol",
+    "charger-controller",
+    "charger-controller-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Roman Samarev <samarev@acm.org>"]
+license = "MIT"
+
+[workspace.dependencies]
+# Shared dependencies across all crates
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+log = "0.4"
+btleplug = "0.11"
+tokio-stream = "0.1"
+futures = "0.3"
+uuid = "1.6"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
+
+# Optimization for debug builds (needed for iced on macOS)
+# The objc2/icrate message verification is buggy in debug mode
+[profile.dev]
+opt-level = 1  # Basic optimizations
+
+[profile.dev.package.objc2]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.icrate]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.objc-sys]
+opt-level = 3
+debug-assertions = false
