@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -46,7 +46,7 @@ jobs:
 
       - name: Upload protocol artifact
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mc5000-protocol
           path: |
@@ -55,28 +55,50 @@ jobs:
           retention-days: 7
 
   build-controllers:
-    name: build controllers (${{ matrix.platform.label }})
+    name: build controllers (${{ matrix.platform.label }}-${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
         platform:
           - label: linux
+            arch: x86_64
             runner: ubuntu-latest
-            cli_archive: charger-cli-linux.zip
-            ui_archive: charger-controller-ui-linux.zip
+            target: x86_64-unknown-linux-gnu
+            cli_archive: charger-cli-linux-x86_64.zip
+            ui_archive: charger-controller-ui-linux-x86_64.zip
+            ui_binary: charger-controller
+            cli_binary: charger-cli
+          - label: linux
+            arch: arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cli_archive: charger-cli-linux-arm64.zip
+            ui_archive: charger-controller-ui-linux-arm64.zip
             ui_binary: charger-controller
             cli_binary: charger-cli
           - label: windows
+            arch: x86_64
             runner: windows-latest
-            cli_archive: charger-cli-windows.zip
-            ui_archive: charger-controller-ui-windows.zip
+            target: x86_64-pc-windows-msvc
+            cli_archive: charger-cli-windows-x86_64.zip
+            ui_archive: charger-controller-ui-windows-x86_64.zip
             ui_binary: charger-controller.exe
             cli_binary: charger-cli.exe
           - label: macos
+            arch: x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            cli_archive: charger-cli-macos-x86_64.zip
+            ui_archive: charger-controller-ui-macos-x86_64.zip
+            ui_binary: charger-controller
+            cli_binary: charger-cli
+          - label: macos
+            arch: arm64
             runner: macos-latest
-            cli_archive: charger-cli-macos.zip
-            ui_archive: charger-controller-ui-macos.zip
+            target: aarch64-apple-darwin
+            cli_archive: charger-cli-macos-arm64.zip
+            ui_archive: charger-controller-ui-macos-arm64.zip
             ui_binary: charger-controller
             cli_binary: charger-cli
 
@@ -84,17 +106,25 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install cross for ARM64 builds
+        if: matrix.platform.arch == 'arm64' && runner.os == 'Linux'
+        shell: bash
+        run: cargo install cross
+
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.platform.arch == 'x86_64'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev \
+            libdbus-1-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
             libgl1-mesa-dev \
@@ -109,10 +139,20 @@ jobs:
             pkg-config
 
       - name: Build CLI
-        run: cargo build --locked --release -p charger-controller-cli
+        if: matrix.platform.arch != 'arm64' || runner.os != 'Linux'
+        run: cargo build --locked --release -p charger-controller-cli --target ${{ matrix.platform.target }}
+
+      - name: Build CLI (cross)
+        if: matrix.platform.arch == 'arm64' && runner.os == 'Linux'
+        run: cross build --locked --release -p charger-controller-cli --target ${{ matrix.platform.target }}
 
       - name: Build GUI
-        run: cargo build --locked --release -p charger-controller
+        if: matrix.platform.arch != 'arm64' || runner.os != 'Linux'
+        run: cargo build --locked --release -p charger-controller --target ${{ matrix.platform.target }}
+
+      - name: Build GUI (cross)
+        if: matrix.platform.arch == 'arm64' && runner.os == 'Linux'
+        run: cross build --locked --release -p charger-controller --target ${{ matrix.platform.target }}
 
       - name: Stage Linux CLI package
         if: runner.os == 'Linux'
@@ -121,7 +161,7 @@ jobs:
           set -euo pipefail
           rm -rf dist
           mkdir -p dist/cli
-          cp "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.cli_binary }}" dist/cli/
           cp README.md LICENSE dist/cli/
           cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
           (cd dist && zip -r "${{ matrix.platform.cli_archive }}" cli)
@@ -133,7 +173,7 @@ jobs:
           set -euo pipefail
           rm -rf dist
           mkdir -p dist/cli
-          cp "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.cli_binary }}" dist/cli/
           cp README.md LICENSE dist/cli/
           cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
           ditto -c -k --keepParent dist/cli "dist/${{ matrix.platform.cli_archive }}"
@@ -144,7 +184,7 @@ jobs:
         run: |
           Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path dist/cli | Out-Null
-          Copy-Item "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          Copy-Item "target/${{ matrix.platform.target }}/release/${{ matrix.platform.cli_binary }}" dist/cli/
           Copy-Item README.md, LICENSE dist/cli/
           Copy-Item packaging/common/README-cli.txt dist/cli/PACKAGE.txt
           Compress-Archive -Path dist/cli/* -DestinationPath "dist/${{ matrix.platform.cli_archive }}" -Force
@@ -155,7 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/ui
-          cp "target/release/${{ matrix.platform.ui_binary }}" dist/ui/
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.ui_binary }}" dist/ui/
           cp -R img dist/ui/
           cp README.md LICENSE dist/ui/
           cp packaging/common/README-ui.txt dist/ui/PACKAGE.txt
@@ -167,7 +207,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist/ui -Force | Out-Null
-          Copy-Item "target/release/${{ matrix.platform.ui_binary }}" dist/ui/
+          Copy-Item "target/${{ matrix.platform.target }}/release/${{ matrix.platform.ui_binary }}" dist/ui/
           Copy-Item -Recurse img dist/ui/
           Copy-Item README.md, LICENSE dist/ui/
           Copy-Item packaging/common/README-ui.txt dist/ui/PACKAGE.txt
@@ -185,8 +225,10 @@ jobs:
             --release \
             --dmg \
             --output-dir dist \
+            --binary-path "target/${{ matrix.platform.target }}/release/charger-controller" \
             --version "$APP_VERSION"
           cp packaging/common/README-ui.txt dist/README-ui.txt
+          cp packaging/macos/README-unsigned.txt dist/README-unsigned.txt
           ditto -c -k --sequesterRsrc --keepParent dist/MC5000Charger.app "dist/${{ matrix.platform.ui_archive }}"
 
       - name: Generate checksums
@@ -228,12 +270,13 @@ jobs:
             dist/${{ matrix.platform.ui_archive }}.sha256
             dist/MC5000Charger.dmg
             dist/MC5000Charger.dmg.sha256
+            dist/README-unsigned.txt
 
       - name: Upload controller artifacts
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: controllers-${{ matrix.platform.label }}
+          name: controllers-${{ matrix.platform.label }}-${{ matrix.platform.arch }}
           path: |
             dist/${{ matrix.platform.cli_archive }}
             dist/${{ matrix.platform.cli_archive }}.sha256
@@ -241,5 +284,6 @@ jobs:
             dist/${{ matrix.platform.ui_archive }}.sha256
             dist/MC5000Charger.dmg
             dist/MC5000Charger.dmg.sha256
+            dist/README-unsigned.txt
           if-no-files-found: ignore
           retention-days: 7
