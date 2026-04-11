@@ -192,6 +192,21 @@ cargo test
 MC5000_VERBOSE=1 cargo run -p charger-controller
 ```
 
+### Release Automation
+
+- GitHub Actions workflow: `.github/workflows/release.yml`
+- Manual pre-release build: run the `build and release` workflow with `workflow_dispatch`
+- Release build: publishing a GitHub release triggers the same workflow and uploads assets to the release
+
+Generated assets are separated into:
+
+- `mc5000-protocol` crate package
+- `charger-cli` portable archives for Linux, Windows, and macOS
+- `charger-controller` portable archives for Linux and Windows
+- `MC5000Charger.app` zipped bundle and `MC5000Charger.dmg` for macOS
+
+Packaging metadata and auxiliary files live in `packaging/`, including the macOS bundling script at `packaging/macos/create_app_bundle.sh`.
+
 ## License
 
 MIT

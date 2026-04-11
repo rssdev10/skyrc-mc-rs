@@ -35,6 +35,7 @@ coverage/
 # Python
 __pycache__/
 *.py
+*.pyc
 
 # Node
 node_modules/

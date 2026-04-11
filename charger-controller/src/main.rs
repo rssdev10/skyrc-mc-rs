@@ -1,6 +1,7 @@
 use iced::{Application, Settings};
 use iced::window;
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 mod app;
 mod slot;
@@ -489,16 +490,36 @@ fn parse_chemistry(s: &str) -> Option<mc5000_protocol::BatteryChemistry> {
     }
 }
 
-fn load_icon() -> Option<window::Icon> {
-    // Try to load the icon from the img directory
-    let icon_path = std::path::Path::new("img/mc5000.jpg");
-    
-    if !icon_path.exists() {
-        eprintln!("Warning: Icon file not found at {:?}", icon_path);
-        return None;
+fn candidate_icon_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(executable_dir) = executable.parent() {
+            candidates.push(executable_dir.join("img/mc5000.jpg"));
+
+            if let Some(contents_dir) = executable_dir.parent() {
+                candidates.push(contents_dir.join("Resources/img/mc5000.jpg"));
+            }
+        }
     }
-    
-    match image::open(icon_path) {
+
+    candidates.push(PathBuf::from("img/mc5000.jpg"));
+    candidates
+}
+
+fn find_icon_path() -> Option<PathBuf> {
+    candidate_icon_paths()
+        .into_iter()
+        .find(|candidate| Path::new(candidate).exists())
+}
+
+fn load_icon() -> Option<window::Icon> {
+    let Some(icon_path) = find_icon_path() else {
+        eprintln!("Warning: Icon file not found in expected locations");
+        return None;
+    };
+
+    match image::open(&icon_path) {
         Ok(img) => {
             // Convert to RGBA format and resize to reasonable icon size
             let rgba = img.resize(256, 256, image::imageops::FilterType::Lanczos3).to_rgba8();
