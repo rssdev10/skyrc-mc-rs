@@ -69,14 +69,6 @@ jobs:
             ui_archive: charger-controller-ui-linux-x86_64.zip
             ui_binary: charger-controller
             cli_binary: charger-cli
-          - label: linux
-            arch: arm64
-            runner: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cli_archive: charger-cli-linux-arm64.zip
-            ui_archive: charger-controller-ui-linux-arm64.zip
-            ui_binary: charger-controller
-            cli_binary: charger-cli
           - label: windows
             arch: x86_64
             runner: windows-latest
@@ -87,7 +79,7 @@ jobs:
             cli_binary: charger-cli.exe
           - label: macos
             arch: x86_64
-            runner: macos-13
+            runner: macos-latest
             target: x86_64-apple-darwin
             cli_archive: charger-cli-macos-x86_64.zip
             ui_archive: charger-controller-ui-macos-x86_64.zip
@@ -103,7 +95,7 @@ jobs:
             cli_binary: charger-cli
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,20 +131,10 @@ jobs:
             pkg-config
 
       - name: Build CLI
-        if: matrix.platform.arch != 'arm64' || runner.os != 'Linux'
         run: cargo build --locked --release -p charger-controller-cli --target ${{ matrix.platform.target }}
 
-      - name: Build CLI (cross)
-        if: matrix.platform.arch == 'arm64' && runner.os == 'Linux'
-        run: cross build --locked --release -p charger-controller-cli --target ${{ matrix.platform.target }}
-
       - name: Build GUI
-        if: matrix.platform.arch != 'arm64' || runner.os != 'Linux'
         run: cargo build --locked --release -p charger-controller --target ${{ matrix.platform.target }}
-
-      - name: Build GUI (cross)
-        if: matrix.platform.arch == 'arm64' && runner.os == 'Linux'
-        run: cross build --locked --release -p charger-controller --target ${{ matrix.platform.target }}
 
       - name: Stage Linux CLI package
         if: runner.os == 'Linux'
