@@ -1,0 +1,245 @@
+name: build and release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package-protocol:
+    name: package mc5000-protocol
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package protocol crate
+        id: protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --locked -p mc5000-protocol --allow-dirty --no-verify
+          crate_file=$(find target/package -maxdepth 1 -name 'mc5000-protocol-*.crate' -print -quit)
+          crate_name=$(basename "$crate_file")
+          mkdir -p dist
+          cp "$crate_file" "dist/$crate_name"
+          shasum -a 256 "dist/$crate_name" | awk '{print $1}' > "dist/$crate_name.sha256"
+          echo "crate_name=$crate_name" >> "$GITHUB_OUTPUT"
+
+      - name: Release protocol package
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ steps.protocol.outputs.crate_name }}
+            dist/${{ steps.protocol.outputs.crate_name }}.sha256
+
+      - name: Upload protocol artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc5000-protocol
+          path: |
+            dist/${{ steps.protocol.outputs.crate_name }}
+            dist/${{ steps.protocol.outputs.crate_name }}.sha256
+          retention-days: 7
+
+  build-controllers:
+    name: build controllers (${{ matrix.platform.label }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: linux
+            runner: ubuntu-latest
+            cli_archive: charger-cli-linux.zip
+            ui_archive: charger-controller-ui-linux.zip
+            ui_binary: charger-controller
+            cli_binary: charger-cli
+          - label: windows
+            runner: windows-latest
+            cli_archive: charger-cli-windows.zip
+            ui_archive: charger-controller-ui-windows.zip
+            ui_binary: charger-controller.exe
+            cli_binary: charger-cli.exe
+          - label: macos
+            runner: macos-latest
+            cli_archive: charger-cli-macos.zip
+            ui_archive: charger-controller-ui-macos.zip
+            ui_binary: charger-controller
+            cli_binary: charger-cli
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            pkg-config
+
+      - name: Build CLI
+        run: cargo build --locked --release -p charger-controller-cli
+
+      - name: Build GUI
+        run: cargo build --locked --release -p charger-controller
+
+      - name: Stage Linux CLI package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/cli
+          cp "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          cp README.md LICENSE dist/cli/
+          cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          (cd dist && zip -r "${{ matrix.platform.cli_archive }}" cli)
+
+      - name: Stage macOS CLI package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/cli
+          cp "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          cp README.md LICENSE dist/cli/
+          cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          ditto -c -k --keepParent dist/cli "dist/${{ matrix.platform.cli_archive }}"
+
+      - name: Stage Windows CLI package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path dist/cli | Out-Null
+          Copy-Item "target/release/${{ matrix.platform.cli_binary }}" dist/cli/
+          Copy-Item README.md, LICENSE dist/cli/
+          Copy-Item packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          Compress-Archive -Path dist/cli/* -DestinationPath "dist/${{ matrix.platform.cli_archive }}" -Force
+
+      - name: Stage Linux GUI package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/ui
+          cp "target/release/${{ matrix.platform.ui_binary }}" dist/ui/
+          cp -R img dist/ui/
+          cp README.md LICENSE dist/ui/
+          cp packaging/common/README-ui.txt dist/ui/PACKAGE.txt
+          cp packaging/linux/README.txt dist/ui/PLATFORM.txt
+          (cd dist && zip -r "${{ matrix.platform.ui_archive }}" ui)
+
+      - name: Stage Windows GUI package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/ui -Force | Out-Null
+          Copy-Item "target/release/${{ matrix.platform.ui_binary }}" dist/ui/
+          Copy-Item -Recurse img dist/ui/
+          Copy-Item README.md, LICENSE dist/ui/
+          Copy-Item packaging/common/README-ui.txt dist/ui/PACKAGE.txt
+          Copy-Item packaging/windows/README.txt dist/ui/PLATFORM.txt
+          Compress-Archive -Path dist/ui/* -DestinationPath "dist/${{ matrix.platform.ui_archive }}" -Force
+
+      - name: Stage macOS GUI package
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APP_VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./packaging/macos/create_app_bundle.sh \
+            --release \
+            --dmg \
+            --output-dir dist \
+            --version "$APP_VERSION"
+          cp packaging/common/README-ui.txt dist/README-ui.txt
+          ditto -c -k --sequesterRsrc --keepParent dist/MC5000Charger.app "dist/${{ matrix.platform.ui_archive }}"
+
+      - name: Generate checksums
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shasum -a 256 "dist/${{ matrix.platform.cli_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.cli_archive }}.sha256"
+          shasum -a 256 "dist/${{ matrix.platform.ui_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.ui_archive }}.sha256"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            shasum -a 256 dist/MC5000Charger.dmg | awk '{print $1}' > dist/MC5000Charger.dmg.sha256
+          fi
+
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-FileHash "dist/${{ matrix.platform.cli_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.cli_archive }}.sha256"
+          (Get-FileHash "dist/${{ matrix.platform.ui_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.ui_archive }}.sha256"
+
+      - name: Release controller artifacts
+        if: github.event_name == 'release' && runner.os != 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.ui_archive }}
+            dist/${{ matrix.platform.ui_archive }}.sha256
+
+      - name: Release macOS controller artifacts
+        if: github.event_name == 'release' && runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.ui_archive }}
+            dist/${{ matrix.platform.ui_archive }}.sha256
+            dist/MC5000Charger.dmg
+            dist/MC5000Charger.dmg.sha256
+
+      - name: Upload controller artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: controllers-${{ matrix.platform.label }}
+          path: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.ui_archive }}
+            dist/${{ matrix.platform.ui_archive }}.sha256
+            dist/MC5000Charger.dmg
+            dist/MC5000Charger.dmg.sha256
+          if-no-files-found: ignore
+          retention-days: 7
