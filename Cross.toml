@@ -1,9 +1,0 @@
-[build]
-# Pre-build commands to install additional dependencies in the cross container
-pre-build = [
-  "apt-get update",
-  "apt-get install -y libdbus-1-dev:arm64"
-]
-
-[target.aarch64-unknown-linux-gnu]
-# Image and pre-build inherited from [build] section
