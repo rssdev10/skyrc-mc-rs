@@ -1,5 +1,5 @@
-use iced::{Application, Settings};
 use iced::window;
+
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -158,16 +158,18 @@ fn run_gui(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Load window icon
     let icon = load_icon();
     
-    ChargerApp::run(Settings {
-        window: iced::window::Settings {
+    iced::application(ChargerApp::new, ChargerApp::update, ChargerApp::view)
+        .title("MC5000 Charger Controller")
+        .subscription(ChargerApp::subscription)
+        .theme(ChargerApp::theme)
+        .window(window::Settings {
             size: iced::Size::new(1200.0, 800.0),
             position: iced::window::Position::Centered,
             min_size: Some(iced::Size::new(800.0, 600.0)),
             icon,
             ..Default::default()
-        },
-        ..Default::default()
-    })?;
+        })
+        .run()?;
     
     Ok(())
 }
@@ -350,7 +352,7 @@ fn run_monitor(verbose: bool, interval: u64) -> Result<(), Box<dyn std::error::E
 }
 
 fn run_start(verbose: bool, slot: u8, chemistry: &str, current: u16, capacity: u16) -> Result<(), Box<dyn std::error::Error>> {
-    use mc5000_protocol::{BatteryChemistry, ChargeConfig, OperationMode, MC5000Protocol};
+    use mc5000_protocol::{ChargeConfig, OperationMode, MC5000Protocol};
     
     if slot < 1 || slot > 4 {
         eprintln!("Invalid slot number. Must be 1-4.");
@@ -526,7 +528,6 @@ fn load_icon() -> Option<window::Icon> {
             let (width, height) = rgba.dimensions();
             let pixels = rgba.into_raw();
             
-            // Iced 0.12 uses icon::from_rgba
             match window::icon::from_rgba(pixels, width, height) {
                 Ok(icon) => {
                     println!("[INFO] ✓ Window icon loaded successfully");

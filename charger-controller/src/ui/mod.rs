@@ -65,17 +65,17 @@ pub fn main_view<'a>(
         .into()
 }
 
-fn create_header(connection_status: &ConnectionStatus) -> Element<AppMessage> {
+fn create_header(connection_status: &ConnectionStatus) -> Element<'_, AppMessage> {
     use iced::widget::button;
     
     let title = text("Multi-Slot Charger Controller")
         .size(24);
 
     let status_text = match connection_status {
-        ConnectionStatus::Disconnected => text("Disconnected").style(iced::Color::from_rgb(0.8, 0.2, 0.2)),
-        ConnectionStatus::Connecting => text("Connecting...").style(iced::Color::from_rgb(0.2, 0.6, 1.0)),
-        ConnectionStatus::Connected => text("Connected").style(iced::Color::from_rgb(0.2, 0.8, 0.2)),
-        ConnectionStatus::Error(msg) => text(format!("Error: {}", msg)).style(iced::Color::from_rgb(0.8, 0.2, 0.2)),
+        ConnectionStatus::Disconnected => text("Disconnected").color(iced::Color::from_rgb(0.8, 0.2, 0.2)),
+        ConnectionStatus::Connecting => text("Connecting...").color(iced::Color::from_rgb(0.2, 0.6, 1.0)),
+        ConnectionStatus::Connected => text("Connected").color(iced::Color::from_rgb(0.2, 0.8, 0.2)),
+        ConnectionStatus::Error(msg) => text(format!("Error: {}", msg)).color(iced::Color::from_rgb(0.8, 0.2, 0.2)),
     };
     
     // Simple Auto button (detect Li-Ion/NiMH, charge at 500mA)
@@ -86,7 +86,7 @@ fn create_header(connection_status: &ConnectionStatus) -> Element<AppMessage> {
         )
         .on_press(AppMessage::SimpleAutoCharge)
         .padding(10)
-        .style(iced::theme::Button::Primary)
+        .style(button::primary)
     } else {
         button(
             text("Auto")
@@ -103,7 +103,7 @@ fn create_header(connection_status: &ConnectionStatus) -> Element<AppMessage> {
         )
         .on_press(AppMessage::SmartChargeAll)
         .padding(10)
-        .style(iced::theme::Button::Secondary)
+        .style(button::secondary)
     } else {
         button(
             text("SmartCharge")
@@ -120,7 +120,7 @@ fn create_header(connection_status: &ConnectionStatus) -> Element<AppMessage> {
         )
         .on_press(AppMessage::StopAllSlots)
         .padding(10)
-        .style(iced::theme::Button::Destructive)
+        .style(button::danger)
     } else {
         button(
             text("Stop All")
@@ -131,16 +131,16 @@ fn create_header(connection_status: &ConnectionStatus) -> Element<AppMessage> {
 
     row![
         title,
-        iced::widget::horizontal_space(),
+        iced::widget::space::horizontal(),
         auto_button,
-        iced::widget::Space::with_width(Length::Fixed(10.0)),
+        iced::widget::Space::new().width(Length::Fixed(10.0)),
         smart_button,
-        iced::widget::Space::with_width(Length::Fixed(10.0)),
+        iced::widget::Space::new().width(Length::Fixed(10.0)),
         stop_all_button,
-        iced::widget::horizontal_space().width(Length::Fixed(20.0)),
+        iced::widget::Space::new().width(Length::Fixed(20.0)),
         status_text,
     ]
-    .align_items(iced::Alignment::Center)
+    .align_y(iced::Center)
     .into()
 }
 

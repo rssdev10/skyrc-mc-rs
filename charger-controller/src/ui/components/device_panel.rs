@@ -45,7 +45,7 @@ pub fn view<'a>(
 
         row![device_picker, connect_button, refresh_button]
             .spacing(10)
-            .align_items(iced::Alignment::Center)
+            .align_y(iced::Center)
     } else {
         row![
             text(format!("Connected to: {}", 
@@ -53,10 +53,10 @@ pub fn view<'a>(
             )),
             button("Disconnect")
                 .on_press(AppMessage::DisconnectDevice)
-                .style(iced::theme::Button::Destructive),
+                .style(button::danger),
         ]
         .spacing(10)
-        .align_items(iced::Alignment::Center)
+        .align_y(iced::Center)
     };
 
     container(
@@ -67,7 +67,7 @@ pub fn view<'a>(
         .spacing(10)
     )
     .padding(15)
-    .style(iced::theme::Container::Box)
+    .style(container::bordered_box)
     .width(Length::Fill)
     .into()
 }

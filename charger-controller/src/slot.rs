@@ -298,7 +298,7 @@ impl Slot {
         let progress = (v_compensated - vmin) / (vmax - vmin);
         
         // Clip to [0, 1] and convert to percentage
-        (progress.max(0.0).min(1.0) * 100.0)
+        progress.max(0.0).min(1.0) * 100.0
     }
     
     pub fn estimate_chemistry_from_voltage(&self) -> BatteryChemistry {

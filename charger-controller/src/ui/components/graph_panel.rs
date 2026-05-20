@@ -21,7 +21,7 @@ pub fn view<'a>(data_logger: &'a DataLogger, slots: &'a [Slot; 4], selected_slot
         .spacing(10)
         .padding(15)
     )
-    .style(iced::theme::Container::Box)
+    .style(container::bordered_box)
     .width(Length::FillPortion(2))
     .into()
 }

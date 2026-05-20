@@ -27,15 +27,10 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 
 # Optimization for debug builds (needed for iced on macOS)
-# The objc2/icrate message verification is buggy in debug mode
 [profile.dev]
 opt-level = 1  # Basic optimizations
 
 [profile.dev.package.objc2]
-opt-level = 3
-debug-assertions = false
-
-[profile.dev.package.icrate]
 opt-level = 3
 debug-assertions = false
 

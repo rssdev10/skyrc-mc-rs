@@ -1,12 +1,12 @@
 use iced::{
-    widget::{button, column, container, row as iced_row, scrollable, text, horizontal_rule},
+    widget::{button, column, container, row as iced_row, rule, scrollable, text},
     Element, Length,
 };
 
 use crate::app::AppMessage;
 use crate::data::DataLogger;
 
-pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<AppMessage> {
+pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<'_, AppMessage> {
     let stats = data_logger.get_statistics();
     let aligned_row_count = data_logger.get_time_aligned_data().len();
     
@@ -41,7 +41,7 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<AppM
             .on_press(AppMessage::ExportTimeAligned),
         button("Clear Data")
             .on_press(AppMessage::ClearData)
-            .style(iced::theme::Button::Destructive),
+            .style(button::danger),
     ]
     .spacing(10);
 
@@ -49,7 +49,7 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<AppM
     let toggle_text = if show_detailed_stats { "▼ Hide Event Stream" } else { "▶ Show Event Stream" };
     let toggle_button = button(text(toggle_text).size(12))
         .on_press(AppMessage::ToggleDetailedStats)
-        .style(iced::theme::Button::Secondary);
+        .style(button::secondary);
 
     // Build the main content
     let mut content_elements: Vec<Element<AppMessage>> = vec![
@@ -57,9 +57,9 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<AppM
         measurement_count.into(),
         aligned_info.into(),
         time_range.into(),
-        horizontal_rule(1).into(),
+        rule::horizontal(1).into(),
         export_controls.into(),
-        horizontal_rule(1).into(),
+        rule::horizontal(1).into(),
         toggle_button.into(),
     ];
 
@@ -98,7 +98,7 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<AppM
             .spacing(8)
             .padding(15)
     )
-    .style(iced::theme::Container::Box)
+    .style(container::bordered_box)
     .width(Length::FillPortion(1))
     .into()
 }

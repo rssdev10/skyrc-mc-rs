@@ -13,10 +13,10 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
 
     let slot_header = row![
         text(format!("Slot {}", slot.id.0 + 1)).size(16),
-        iced::widget::horizontal_space(),
+        iced::widget::space::horizontal(),
         status_badge(&slot.state),
     ]
-    .align_items(iced::Alignment::Center);
+    .align_y(iced::Center);
 
     let measurements = column![
         row![
@@ -25,13 +25,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
                 text(format!("{:.3}V", slot.current_voltage)).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
             column![
                 text("Current").size(12),
                 text(format!("{}mA", slot.current_current as u16)).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
         ]
         .spacing(10),
         row![
@@ -40,13 +40,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
                 text(format!("{:.1}W", slot.power_w())).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
             column![
                 text("Capacity").size(12),
                 text(format!("{}mAh", slot.capacity_mah)).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
         ]
         .spacing(10),
         row![
@@ -55,13 +55,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
                 text(format!("{}mΩ", slot.resistance_milliohm)).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
             column![
                 text("Time").size(12),
                 text(format!("{:02}:{:02}", slot.elapsed_seconds / 60, slot.elapsed_seconds % 60)).size(14),
             ]
             .width(Length::FillPortion(1))
-            .align_items(iced::Alignment::Center),
+            .align_x(iced::Center),
         ]
         .spacing(10),
     ]
@@ -76,7 +76,7 @@ fn status_badge(state: &SlotState) -> Element<'static, AppMessage> {
         SlotState::Error(_) => ("⚠ Error", iced::Color::from_rgb(0.8, 0.2, 0.2)),
         SlotState::Paused => ("⏸ Paused", iced::Color::from_rgb(0.8, 0.8, 0.2)),
     };
-    text(status_text).size(14).style(color).into()
+    text(status_text).size(14).color(color).into()
 }
 
     let progress = if slot.is_active() {
@@ -129,7 +129,7 @@ fn status_badge(state: &SlotState) -> Element<'static, AppMessage> {
     mouse_area(
         container(content)
             .style(move |_theme: &iced::Theme| {
-                container::Appearance {
+                container::Style {
                     border: Border {
                         color: border_color,
                         width: border_width,
@@ -216,10 +216,10 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     let buttons = row![
         button("Cancel")
             .on_press(AppMessage::CancelSlotConfig(slot.id))
-            .style(iced::theme::Button::Secondary),
+            .style(button::secondary),
         button("Start")
             .on_press(AppMessage::ApplySlotConfig(slot.id))
-            .style(iced::theme::Button::Primary),
+            .style(button::primary),
     ]
     .spacing(10);
 
@@ -236,16 +236,16 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     .padding(10);
 
     container(content)
-        .style(iced::theme::Container::Box)
+        .style(container::bordered_box)
         .width(Length::Fill)
         .into()
 }
 
-fn create_slot_controls(slot: &Slot, is_connected: bool) -> Element<AppMessage> {
+fn create_slot_controls(slot: &Slot, is_connected: bool) -> Element<'_, AppMessage> {
     if slot.is_idle() {
         // Show simple start button that opens config dialog - only enabled when connected
         let mut btn = button("Configure & Start")
-            .style(iced::theme::Button::Primary);
+            .style(button::primary);
         
         if is_connected {
             // Pass current voltage for chemistry detection
@@ -258,13 +258,13 @@ fn create_slot_controls(slot: &Slot, is_connected: bool) -> Element<AppMessage> 
         // Show stop button for active tasks - always enabled
         button("Stop All")
             .on_press(AppMessage::StopTask(slot.id))
-            .style(iced::theme::Button::Destructive)
+            .style(button::danger)
             .into()
     } else {
         // Completed or error state - show reset button - always enabled
         button("Reset")
             .on_press(AppMessage::StopTask(slot.id))
-            .style(iced::theme::Button::Secondary)
+            .style(button::secondary)
             .into()
     }
 }

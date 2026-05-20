@@ -1,6 +1,6 @@
 use iced::{
-    widget::{button, column, container, pick_list, row, text, text_input, Column, Row},
-    Alignment, Element, Length,
+    widget::{button, column, container, pick_list, row, text, text_input},
+    Element, Length,
 };
 
 use crate::config_dialog::{ChargeConfig, ChargeMode};
@@ -171,7 +171,7 @@ impl ConfigDialogState {
     }
 }
 
-pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
+pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> {
     // Battery type picker
     let all_chemistries = BatteryChemistry::all();
     let chemistry_picker = pick_list(
@@ -198,10 +198,10 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
         .size(24),
         row![text("Battery Type: ").width(Length::Fixed(150.0)), chemistry_picker]
             .spacing(10)
-            .align_items(Alignment::Center),
+            .align_y(iced::Center),
         row![text("Mode: ").width(Length::Fixed(150.0)), mode_picker]
             .spacing(10)
-            .align_items(Alignment::Center),
+            .align_y(iced::Center),
     ]
     .spacing(15)
     .padding(20);
@@ -215,7 +215,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Charge current (for charge/cycle/storage modes)
@@ -228,7 +228,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
     }
 
@@ -242,7 +242,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
     }
 
@@ -255,7 +255,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Cutoff voltage
@@ -267,7 +267,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Storage voltage (for storage mode)
@@ -280,7 +280,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
     }
 
@@ -294,7 +294,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
 
         // Trickle charge
@@ -306,7 +306,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
     }
 
@@ -319,7 +319,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Discharge cutoff current
@@ -331,7 +331,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Cutoff timer
@@ -343,7 +343,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                 .width(Length::Fixed(150.0))
         ]
         .spacing(10)
-        .align_items(Alignment::Center)
+        .align_y(iced::Center)
     );
 
     // Cycle-specific parameters
@@ -356,7 +356,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
 
         content = content.push(
@@ -367,7 +367,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                     .width(Length::Fixed(150.0))
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_y(iced::Center)
         );
 
         if matches!(state.mode, ChargeMode::Cycle) {
@@ -379,7 +379,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
                         .width(Length::Fixed(150.0))
                 ]
                 .spacing(10)
-                .align_items(Alignment::Center)
+                .align_y(iced::Center)
             );
         }
     }
@@ -403,10 +403,10 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<AppMessage> {
             button(text(action_text))
                 .on_press(AppMessage::ConfigDialogConfirm)
                 .padding(10)
-                .style(iced::theme::Button::Primary),
+                .style(button::primary),
         ]
         .spacing(20)
-        .padding([20, 0, 0, 0])
+        .padding(iced::Padding { top: 20.0, right: 0.0, bottom: 0.0, left: 0.0 })
     );
 
     container(content)

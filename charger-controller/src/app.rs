@@ -1,6 +1,7 @@
-use iced::{executor, Application, Command, Element, Subscription, Theme};
-use iced::window;
+use iced::{Element, Subscription, Task, Theme};
+
 use std::time::{Duration, Instant};
+use std::hash::{Hash, Hasher};
 use futures::stream::StreamExt;
 
 use mc5000_protocol::{
@@ -12,7 +13,7 @@ use crate::slot::{Slot, SlotId, SlotState, TaskConfig, BatteryChemistry, TaskTyp
 use crate::data::{DataLogger, MeasurementPoint};
 use crate::export::CsvExporter;
 use crate::ui;
-use crate::config_dialog::{ChargeMode, ChargeConfig as DialogChargeConfig};
+use crate::config_dialog::{ChargeMode};
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
@@ -103,13 +104,94 @@ pub enum ConnectionStatus {
     Error(String),
 }
 
-impl Application for ChargerApp {
-    type Executor = executor::Default;
-    type Message = AppMessage;
-    type Theme = Theme;
-    type Flags = ();
+/// Wrapper for BLE peripheral that implements Hash for subscription identity
+struct NotificationData {
+    peripheral: btleplug::platform::Peripheral,
+    verbose: bool,
+}
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
+impl Hash for NotificationData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "mc5000_notifications".hash(state);
+    }
+}
+
+fn notification_stream(
+    data: &NotificationData,
+) -> impl futures::stream::Stream<Item = AppMessage> {
+    let peripheral = data.peripheral.clone();
+    let verbose = data.verbose;
+
+    futures::stream::unfold(
+        (peripheral, None),
+        move |(peripheral, mut stream_opt)| async move {
+            use btleplug::api::Peripheral as _;
+
+            if stream_opt.is_none() {
+                if verbose {
+                    use std::io::Write;
+                    println!("[SUBSCRIPTION VERBOSE] Creating new notifications stream...");
+                    let _ = std::io::stdout().flush();
+                }
+                match peripheral.notifications().await {
+                    Ok(stream) => {
+                        if verbose {
+                            use std::io::Write;
+                            println!("[SUBSCRIPTION VERBOSE] ✓ Stream created");
+                            let _ = std::io::stdout().flush();
+                        }
+                        stream_opt = Some(stream);
+                    }
+                    Err(e) => {
+                        if verbose {
+                            use std::io::Write;
+                            println!("[SUBSCRIPTION VERBOSE] ✗ Error creating stream: {}", e);
+                            let _ = std::io::stdout().flush();
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        return Some((AppMessage::Tick, (peripheral, None)));
+                    }
+                }
+            }
+
+            if let Some(stream) = stream_opt.as_mut() {
+                match tokio::time::timeout(Duration::from_millis(50), stream.next()).await {
+                    Ok(Some(notif)) => {
+                        if verbose {
+                            use std::io::Write;
+                            println!(
+                                "[SUBSCRIPTION VERBOSE] ✓ Got notification: {} bytes",
+                                notif.value.len()
+                            );
+                            let _ = std::io::stdout().flush();
+                        }
+                        return Some((
+                            AppMessage::NotificationReceived(notif.value),
+                            (peripheral, stream_opt),
+                        ));
+                    }
+                    Ok(None) => {
+                        if verbose {
+                            use std::io::Write;
+                            println!("[SUBSCRIPTION VERBOSE] Stream ended, will recreate");
+                            let _ = std::io::stdout().flush();
+                        }
+                        return Some((AppMessage::Tick, (peripheral, None)));
+                    }
+                    Err(_) => {
+                        return Some((AppMessage::Tick, (peripheral, stream_opt)));
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((AppMessage::Tick, (peripheral, stream_opt)))
+        },
+    )
+}
+
+impl ChargerApp {
+    pub fn new() -> (Self, Task<AppMessage>) {
         let verbose = std::env::var("MC5000_VERBOSE").is_ok();
         
         if verbose {
@@ -154,7 +236,7 @@ impl Application for ChargerApp {
         }
 
         // Start async Bluetooth scan
-        let scan_command = Command::perform(
+        let scan_command = Task::perform(
             async {
                 let mut device_manager = DeviceManager::new();
                 match device_manager.scan_bluetooth_devices().await {
@@ -171,11 +253,11 @@ impl Application for ChargerApp {
         (app, scan_command)
     }
 
-    fn title(&self) -> String {
+    pub fn title(&self) -> String {
         "MC5000 Charger Controller".to_string()
     }
 
-    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+    pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
         let verbose = std::env::var("MC5000_VERBOSE").is_ok();
         
         match message {
@@ -192,7 +274,7 @@ impl Application for ChargerApp {
                         0x02 => 1,
                         0x04 => 2,
                         0x08 => 3,
-                        _ => return Command::none(),
+                        _ => return Task::none(),
                     };
                     
                     if verbose {
@@ -355,7 +437,7 @@ impl Application for ChargerApp {
                         self.data_logger.add_measurement(measurement);
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::Tick => {
@@ -380,12 +462,12 @@ impl Application for ChargerApp {
                         }
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::DeviceSelected(device_name) => {
                 self.selected_device = Some(device_name);
-                Command::none()
+                Task::none()
             }
             
             AppMessage::BluetoothScanComplete(result) => {
@@ -421,7 +503,7 @@ impl Application for ChargerApp {
                         }
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConnectDevice => {
@@ -463,7 +545,7 @@ impl Application for ChargerApp {
                         }
                     }
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::RefreshDevices => {
@@ -475,7 +557,7 @@ impl Application for ChargerApp {
                 self.scanning = true;  // Start scanning, disable UI
                 
                 // Start async scan
-                return Command::perform(
+                return Task::perform(
                     async {
                         let mut device_manager = DeviceManager::new();
                         match device_manager.scan_bluetooth_devices().await {
@@ -497,7 +579,7 @@ impl Application for ChargerApp {
                 for slot in &mut self.slots {
                     slot.stop();
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::SlotMessage(slot_id, slot_msg) => {
@@ -511,7 +593,7 @@ impl Application for ChargerApp {
                         }
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::StartTask(slot_id, config) => {
@@ -551,7 +633,7 @@ impl Application for ChargerApp {
                 if let Some(slot) = self.slots.get_mut(slot_id.0) {
                     slot.start_task(config);
                 }
-                Command::none()
+                Task::none()
             }
             
             // StopTask and StopAllSlots both perform stop-all on the device.
@@ -574,7 +656,7 @@ impl Application for ChargerApp {
                 for slot in &mut self.slots {
                     slot.stop();
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigureSlot(slot_id) => {
@@ -583,7 +665,7 @@ impl Application for ChargerApp {
                 if self.slot_configs[slot_id.0].is_none() {
                     self.slot_configs[slot_id.0] = Some(TaskConfig::default());
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::UpdateSlotChemistry(slot_id, chemistry) => {
@@ -592,21 +674,21 @@ impl Application for ChargerApp {
                     config.target_voltage = chemistry.target_voltage();
                     config.cutoff_voltage = Some(chemistry.cutoff_voltage());
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::UpdateSlotTaskType(slot_id, task_type) => {
                 if let Some(config) = self.slot_configs[slot_id.0].as_mut() {
                     config.task_type = task_type;
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::UpdateSlotCapacity(slot_id, capacity) => {
                 if let Some(config) = self.slot_configs[slot_id.0].as_mut() {
                     config.capacity_limit = Some(capacity);
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::UpdateSlotChargeCurrent(slot_id, current_ma) => {
@@ -614,13 +696,13 @@ impl Application for ChargerApp {
                     config.charge_current_ma = current_ma;
                     config.discharge_current_ma = current_ma.min(2000);
                 }
-                Command::none()
+                Task::none()
             }
 
             AppMessage::CancelSlotConfig(slot_id) => {
                 self.configuring_slot = None;
                 self.slot_configs[slot_id.0] = None;
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ApplySlotConfig(slot_id) => {
@@ -628,12 +710,12 @@ impl Application for ChargerApp {
                     self.configuring_slot = None;
                     return self.update(AppMessage::StartTask(slot_id, config));
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::SlotSelected(slot_index) => {
                 self.selected_slot = Some(slot_index);
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ShowConfigDialog(slot_index, voltage) => {
@@ -641,125 +723,125 @@ impl Application for ChargerApp {
                 self.config_dialog_state = Some(crate::ui::components::config_dialog::ConfigDialogState::new(
                     voltage,  // Voltage-based chemistry detection
                 ));
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigChemistryChanged(chemistry) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.update_chemistry(chemistry);
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigModeChanged(mode) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.update_mode(mode);
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigCapacityChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.capacity_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigChargeCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_current_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDischargeCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_current_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigTargetVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.target_voltage_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigCutoffVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cutoff_voltage_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigStorageVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.storage_voltage_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDeltaPeakChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.delta_peak_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigTrickleChargeChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.trickle_charge_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigCutoffTimerChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cutoff_timer_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigChargeCutoffCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_cutoff_current_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDischargeCutoffCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_cutoff_current_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigChargeRestingChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_resting_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDischargeRestingChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_resting_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigCycleCountChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cycle_count_input = value;
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDialogCancel => {
                 self.config_dialog_state = None;
                 self.pending_slot = None;
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ConfigDialogConfirm => {
@@ -884,7 +966,7 @@ impl Application for ChargerApp {
                     self.pending_slot = None;
                 }
                 
-                Command::none()
+                Task::none()
             }
             
             AppMessage::SimpleAutoCharge => {
@@ -1009,7 +1091,7 @@ impl Application for ChargerApp {
                     }
                 }
                 
-                Command::none()
+                Task::none()
             }
             
             AppMessage::SmartChargeAll => {
@@ -1147,12 +1229,12 @@ impl Application for ChargerApp {
                     }
                 }
                 
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ExportData => {
                 // Default export: time-aligned format
-                Command::perform(
+                Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
                             .set_file_name("charger_data_aligned.csv")
@@ -1166,7 +1248,7 @@ impl Application for ChargerApp {
             }
             
             AppMessage::ExportTimeAligned => {
-                Command::perform(
+                Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
                             .set_file_name("charger_data_aligned.csv")
@@ -1180,7 +1262,7 @@ impl Application for ChargerApp {
             }
             
             AppMessage::ExportAllSamples => {
-                Command::perform(
+                Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
                             .set_file_name("charger_data_all_samples.csv")
@@ -1204,7 +1286,7 @@ impl Application for ChargerApp {
                         println!("✓ Exported {} time-aligned rows to {:?}", aligned_data.len(), path);
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::FileSelectedTimeAligned(path) => {
@@ -1217,7 +1299,7 @@ impl Application for ChargerApp {
                         println!("✓ Exported {} time-aligned rows to {:?}", aligned_data.len(), path);
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::FileSelectedAllSamples(path) => {
@@ -1230,22 +1312,22 @@ impl Application for ChargerApp {
                         println!("✓ Exported {} individual samples to {:?}", measurements.len(), path);
                     }
                 }
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ToggleDetailedStats => {
                 self.show_detailed_stats = !self.show_detailed_stats;
-                Command::none()
+                Task::none()
             }
             
             AppMessage::ClearData => {
                 self.data_logger.clear();
-                Command::none()
+                Task::none()
             }
         }
     }
 
-    fn view(&self) -> Element<Self::Message> {
+    pub fn view(&self) -> Element<'_, AppMessage> {
         let verbose = std::env::var("MC5000_VERBOSE").is_ok();
         if verbose && self.update_counter % 10 == 0 {
             use std::io::Write;
@@ -1269,7 +1351,7 @@ impl Application for ChargerApp {
         )
     }
 
-    fn subscription(&self) -> Subscription<Self::Message> {
+    pub fn subscription(&self) -> Subscription<AppMessage> {
         let tick = iced::time::every(Duration::from_millis(1000))
             .map(|_| AppMessage::Tick);
         
@@ -1280,76 +1362,12 @@ impl Application for ChargerApp {
                     let peripheral_clone = peripheral.clone();
                     let verbose = std::env::var("MC5000_VERBOSE").is_ok();
                     
-                    iced::subscription::unfold(
-                        "mc5000_notifications",
-                        (peripheral_clone, None),  // Store the stream in state
-                        move |(peripheral, mut stream_opt)| async move {
-                            use btleplug::api::Peripheral as _;
-                            use futures::stream::StreamExt;
-                            
-                            // Get or create the notification stream
-                            if stream_opt.is_none() {
-                                if verbose {
-                                    use std::io::Write;
-                                    println!("[SUBSCRIPTION VERBOSE] Creating new notifications stream...");
-                                    let _ = std::io::stdout().flush();
-                                }
-                                match peripheral.notifications().await {
-                                    Ok(stream) => {
-                                        if verbose {
-                                            use std::io::Write;
-                                            println!("[SUBSCRIPTION VERBOSE] ✓ Stream created");
-                                            let _ = std::io::stdout().flush();
-                                        }
-                                        stream_opt = Some(stream);
-                                    }
-                                    Err(e) => {
-                                        if verbose {
-                                            use std::io::Write;
-                                            println!("[SUBSCRIPTION VERBOSE] ✗ Error creating stream: {}", e);
-                                            let _ = std::io::stdout().flush();
-                                        }
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
-                                        return (AppMessage::Tick, (peripheral, None));
-                                    }
-                                }
-                            }
-                            
-                            // Try to get a notification from the stream
-                            if let Some(stream) = stream_opt.as_mut() {
-                                // Wait for notification with timeout
-                                match tokio::time::timeout(
-                                    Duration::from_millis(50),
-                                    stream.next()
-                                ).await {
-                                    Ok(Some(notif)) => {
-                                        if verbose {
-                                            use std::io::Write;
-                                            println!("[SUBSCRIPTION VERBOSE] ✓ Got notification: {} bytes", notif.value.len());
-                                            let _ = std::io::stdout().flush();
-                                        }
-                                        return (AppMessage::NotificationReceived(notif.value), (peripheral, stream_opt));
-                                    }
-                                    Ok(None) => {
-                                        if verbose {
-                                            use std::io::Write;
-                                            println!("[SUBSCRIPTION VERBOSE] Stream ended, will recreate");
-                                            let _ = std::io::stdout().flush();
-                                        }
-                                        // Stream ended, recreate it next time
-                                        return (AppMessage::Tick, (peripheral, None));
-                                    }
-                                    Err(_) => {
-                                        // Timeout - return Tick to keep subscription alive
-                                        return (AppMessage::Tick, (peripheral, stream_opt));
-                                    }
-                                }
-                            }
-                            
-                            // Shouldn't reach here, but just in case
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            (AppMessage::Tick, (peripheral, stream_opt))
-                        }
+                    Subscription::run_with(
+                        NotificationData {
+                            peripheral: peripheral_clone,
+                            verbose,
+                        },
+                        notification_stream,
                     )
                 } else {
                     Subscription::none()
@@ -1364,7 +1382,7 @@ impl Application for ChargerApp {
         Subscription::batch([tick, notifications])
     }
 
-    fn theme(&self) -> Self::Theme {
+    pub fn theme(&self) -> Theme {
         Theme::Dark
     }
 }
@@ -1397,4 +1415,166 @@ fn task_to_charge_config(slot_idx: usize, config: &TaskConfig) -> ChargeConfig {
         config.capacity_limit.unwrap_or(3000) as u16,
         config.charge_current_ma,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_app() -> ChargerApp {
+        let (app, _task) = ChargerApp::new();
+        app
+    }
+
+    #[test]
+    fn test_initial_state() {
+        let app = create_test_app();
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+        assert!(app.scanning); // starts with scan active
+        assert!(app.selected_device.is_none());
+        assert!(app.connected_device.is_none());
+        assert!(app.config_dialog_state.is_none());
+        assert!(!app.show_detailed_stats);
+        for slot in &app.slots {
+            assert_eq!(slot.state, SlotState::Idle);
+        }
+    }
+
+    #[test]
+    fn test_toggle_detailed_stats() {
+        let mut app = create_test_app();
+        assert!(!app.show_detailed_stats);
+        app.update(AppMessage::ToggleDetailedStats);
+        assert!(app.show_detailed_stats);
+        app.update(AppMessage::ToggleDetailedStats);
+        assert!(!app.show_detailed_stats);
+    }
+
+    #[test]
+    fn test_slot_selected() {
+        let mut app = create_test_app();
+        assert_eq!(app.selected_slot, Some(0)); // default
+        app.update(AppMessage::SlotSelected(2));
+        assert_eq!(app.selected_slot, Some(2));
+    }
+
+    #[test]
+    fn test_device_selected() {
+        let mut app = create_test_app();
+        app.update(AppMessage::DeviceSelected("test-device".to_string()));
+        assert_eq!(app.selected_device, Some("test-device".to_string()));
+    }
+
+    #[test]
+    fn test_bluetooth_scan_complete_success() {
+        let mut app = create_test_app();
+        app.scanning = true;
+        let devices = vec!["device1".to_string(), "device2".to_string()];
+        app.update(AppMessage::BluetoothScanComplete(Ok(devices)));
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn test_bluetooth_scan_complete_error() {
+        let mut app = create_test_app();
+        assert!(app.scanning);
+        app.update(AppMessage::BluetoothScanComplete(Err("scan failed".to_string())));
+        assert!(!app.scanning);
+        // Error is logged but connection status stays disconnected
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn test_config_dialog_cancel() {
+        let mut app = create_test_app();
+        app.config_dialog_state = Some(
+            crate::ui::components::config_dialog::ConfigDialogState::new(3.7),
+        );
+        app.pending_slot = Some(SlotId(0));
+        app.update(AppMessage::ConfigDialogCancel);
+        assert!(app.config_dialog_state.is_none());
+    }
+
+    #[test]
+    fn test_notification_received_invalid_data() {
+        let mut app = create_test_app();
+        // Too short - should be ignored
+        app.update(AppMessage::NotificationReceived(vec![0x01, 0x02]));
+        // Wrong header - should be ignored
+        app.update(AppMessage::NotificationReceived(vec![0xFF; 23]));
+        // All slots should remain idle
+        for slot in &app.slots {
+            assert_eq!(slot.state, SlotState::Idle);
+        }
+    }
+
+    #[test]
+    fn test_notification_received_valid_status() {
+        let mut app = create_test_app();
+        // Construct a minimal valid notification:
+        // Header: 0F 15 91, channel_mask 0x01 (slot 0)
+        let mut data = vec![0x0F, 0x15, 0x91, 0x01];
+        // Pad to 23 bytes
+        data.resize(23, 0x00);
+        // Set state byte (byte index varies by parser, but let's exercise the path)
+        app.update(AppMessage::NotificationReceived(data));
+        // The parser may or may not succeed with zeroed data, 
+        // but the app should not panic
+    }
+
+    #[test]
+    fn test_tick_does_not_panic_when_disconnected() {
+        let mut app = create_test_app();
+        // Tick should not panic when no device is connected
+        app.update(AppMessage::Tick);
+    }
+
+    #[test]
+    fn test_clear_data() {
+        let mut app = create_test_app();
+        app.update(AppMessage::ClearData);
+        // Should not panic; data logger should be cleared
+    }
+
+    #[test]
+    fn test_connection_status_variants() {
+        assert_eq!(ConnectionStatus::Disconnected, ConnectionStatus::Disconnected);
+        assert_ne!(ConnectionStatus::Connected, ConnectionStatus::Disconnected);
+        assert_eq!(
+            ConnectionStatus::Error("test".to_string()),
+            ConnectionStatus::Error("test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_task_to_charge_config() {
+        let config = TaskConfig {
+            task_type: TaskType::Charge,
+            battery_chemistry: BatteryChemistry::LiIon,
+            target_voltage: 4.2,
+            target_current: 1.0,
+            cutoff_voltage: None,
+            capacity_limit: Some(2000),
+            time_limit: None,
+            temperature_limit: None,
+            charge_current_ma: 500,
+            discharge_current_ma: 300,
+        };
+        let charge_config = task_to_charge_config(0, &config);
+        assert_eq!(charge_config.charge_current_ma, 500);
+        assert_eq!(charge_config.capacity_mah, 2000);
+    }
+
+    #[test]
+    fn test_bt_state_to_slot_state() {
+        assert_eq!(super::map_bt_state(&BtSlotState::Idle), SlotState::Idle);
+        assert_eq!(super::map_bt_state(&BtSlotState::Charging), SlotState::Charging);
+        assert_eq!(super::map_bt_state(&BtSlotState::Discharging), SlotState::Discharging);
+        assert_eq!(super::map_bt_state(&BtSlotState::Completed), SlotState::Completed);
+        assert_eq!(super::map_bt_state(&BtSlotState::Paused), SlotState::Paused);
+        assert_eq!(
+            super::map_bt_state(&BtSlotState::Error),
+            SlotState::Error("Error".to_string())
+        );
+    }
 }
