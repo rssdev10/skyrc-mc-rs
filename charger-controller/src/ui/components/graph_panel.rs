@@ -230,7 +230,7 @@ impl<'a> GraphCanvas<'a> {
             let y = margin_top + graph_height - (i as f32 / 5.0) * graph_height;
             let voltage_value = min_voltage + (i as f32 / 5.0) * (max_voltage - min_voltage);
             
-            let label = format!("{:.2}V", voltage_value);
+            let label = format!("{:.2} V", voltage_value);
             let text = Text {
                 content: label,
                 position: Point::new(5.0, y - 6.0),
@@ -244,7 +244,7 @@ impl<'a> GraphCanvas<'a> {
         // Draw "V" label on left axis
         let v_label = Text {
             content: "V".to_string(),
-            position: Point::new(5.0, margin_top - 15.0),
+            position: Point::new(45.0, margin_top - 15.0),
             color: Color::from_rgb(1.0, 0.5, 0.5),
             size: 14.0.into(),
             ..Default::default()
@@ -256,10 +256,10 @@ impl<'a> GraphCanvas<'a> {
             let y = margin_top + graph_height - (i as f32 / 5.0) * graph_height;
             let current_value = (i as f32 / 5.0) * max_current;
             
-            let label = format!("{:.2}A", current_value);
+            let label = format!("{:.2} A", current_value);
             let text = Text {
                 content: label,
-                position: Point::new(size.width - margin_right + 5.0, y - 6.0),
+                position: Point::new(size.width - margin_right + 20.0, y - 6.0),
                 color: text_color,
                 size: 12.0.into(),
                 ..Default::default()
@@ -276,11 +276,11 @@ impl<'a> GraphCanvas<'a> {
             ..Default::default()
         };
         frame.fill_text(i_label);
-        
+
         // Draw time axis label at bottom
         let time_label = Text {
             content: "Time".to_string(),
-            position: Point::new(margin_left + graph_width / 2.0 - 20.0, size.height - 10.0),
+            position: Point::new(margin_left + graph_width / 2.0 - 20.0, size.height - 25.0),
             color: text_color,
             size: 14.0.into(),
             ..Default::default()
