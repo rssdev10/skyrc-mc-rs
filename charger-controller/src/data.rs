@@ -17,6 +17,7 @@ pub struct MeasurementPoint {
 }
 
 impl MeasurementPoint {
+    #[allow(dead_code)]
     pub fn new(slot_id: SlotId, voltage: f32, current: f32) -> Self {
         Self {
             timestamp: Utc::now(),
@@ -132,7 +133,7 @@ impl DataLogger {
         
         for (ts, slot_data) in by_second {
             let base_time = DateTime::from_timestamp(ts, 0)
-                .unwrap_or_else(|| Utc::now());
+                .unwrap_or_else(Utc::now);
             
             let mut row = TimeAlignedRow::new(base_time);
             
@@ -166,9 +167,9 @@ impl DataLogger {
             }
             
             // Forward-fill: for slots without data this second, use last known value
-            for slot_idx in 0..4 {
+            for (slot_idx, last_data_opt) in last_known.iter().enumerate() {
                 if row.slots[slot_idx].is_none() {
-                    if let Some(ref last_data) = last_known[slot_idx] {
+                    if let Some(ref last_data) = last_data_opt {
                         row.slots[slot_idx] = Some(last_data.clone());
                     }
                 }
@@ -200,6 +201,7 @@ impl DataLogger {
         &self.measurements[start..]
     }
 
+    #[allow(dead_code)]
     pub fn get_measurements_since(&self, since: DateTime<Utc>) -> Vec<&MeasurementPoint> {
         self.measurements
             .iter()
@@ -211,6 +213,7 @@ impl DataLogger {
         self.measurements.clear();
     }
 
+    #[allow(dead_code)]
     pub fn clear_slot(&mut self, slot_id: SlotId) {
         self.measurements.retain(|m| m.slot_id.0 != slot_id.0);
     }
@@ -261,26 +264,19 @@ impl DataLogger {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct DataStatistics {
     pub total_measurements: usize,
+    #[allow(dead_code)]
     pub slots: HashMap<SlotId, SlotStatistics>,
     pub oldest_measurement: Option<DateTime<Utc>>,
     pub newest_measurement: Option<DateTime<Utc>>,
 }
 
-impl Default for DataStatistics {
-    fn default() -> Self {
-        Self {
-            total_measurements: 0,
-            slots: HashMap::new(),
-            oldest_measurement: None,
-            newest_measurement: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SlotStatistics {
+    #[allow(dead_code)]
     pub slot_id: SlotId,
     pub measurement_count: usize,
     pub min_voltage: f32,

@@ -165,7 +165,7 @@ fn run_gui(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
         .window(window::Settings {
             size: iced::Size::new(1200.0, 800.0),
             position: iced::window::Position::Centered,
-            min_size: Some(iced::Size::new(800.0, 600.0)),
+            min_size: Some(iced::Size::new(1000.0, 600.0)),
             icon,
             ..Default::default()
         })
@@ -219,7 +219,7 @@ fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn std::error:
     
     let rt = tokio::runtime::Runtime::new()?;
     let slots_to_query: Vec<u8> = match slot {
-        Some(s) if s >= 1 && s <= 4 => vec![s],
+        Some(s) if (1..=4).contains(&s) => vec![s],
         _ => vec![1, 2, 3, 4],
     };
     let slots_to_query_clone = slots_to_query.clone();
@@ -354,7 +354,7 @@ fn run_monitor(verbose: bool, interval: u64) -> Result<(), Box<dyn std::error::E
 fn run_start(verbose: bool, slot: u8, chemistry: &str, current: u16, capacity: u16) -> Result<(), Box<dyn std::error::Error>> {
     use mc5000_protocol::{ChargeConfig, OperationMode, MC5000Protocol};
     
-    if slot < 1 || slot > 4 {
+    if !(1..=4).contains(&slot) {
         eprintln!("Invalid slot number. Must be 1-4.");
         return Ok(());
     }
@@ -443,7 +443,7 @@ fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn std::error::E
                     println!("Connected!");
                     
                     let action = match slot {
-                        Some(s) if s >= 1 && s <= 4 => StartStopAction::ChannelMask(1 << (s - 1)),
+                        Some(s) if (1..=4).contains(&s) => StartStopAction::ChannelMask(1 << (s - 1)),
                         _ => StartStopAction::StopAll,
                     };
                     

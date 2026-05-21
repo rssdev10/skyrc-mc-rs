@@ -164,14 +164,15 @@ impl<'a> GraphCanvas<'a> {
         // Add some padding (5%) to the range for better visualization
         let voltage_padding = (global_max_voltage - global_min_voltage) * 0.05;
         global_min_voltage = (global_min_voltage - voltage_padding).max(0.0);
-        global_max_voltage = global_max_voltage + voltage_padding;
+        global_max_voltage += voltage_padding;
 
         let current_padding = global_max_current * 0.05;
-        global_max_current = global_max_current + current_padding;
+        global_max_current += current_padding;
 
         (global_min_voltage, global_max_voltage, global_max_current)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_grid_and_axes(
         &self, 
         frame: &mut canvas::Frame, 
@@ -283,6 +284,7 @@ impl<'a> GraphCanvas<'a> {
         frame.fill_text(time_label);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_slot_data(
         &self,
         frame: &mut canvas::Frame,

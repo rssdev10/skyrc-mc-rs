@@ -79,9 +79,13 @@ pub struct MC5000Protocol {
 }
 
 // MC5000 specific UUIDs (reverse-engineered from BLE traffic, confirmed captures 3-4)
+#[allow(dead_code)]
 const MC5000_SERVICE_UUID: &str = "0000ffe0-0000-1000-8000-00805f9b34fb";
+#[allow(dead_code)]
 const MC5000_COMMAND_CHAR_UUID: &str = "0000ffe1-0000-1000-8000-00805f9b34fb";
+#[allow(dead_code)]
 const MC5000_RESPONSE_CHAR_UUID: &str = "0000ffe1-0000-1000-8000-00805f9b34fb";
+#[allow(dead_code)]
 const MC5000_NOTIFY_CHAR_UUID: &str = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
 // Protocol constants
@@ -94,7 +98,9 @@ const CMD_CHANNEL_STATUS: u8 = 0x91; // Channel status request
 const CMD_START_STOP: u8 = 0x93;    // Start/stop charging command
 const CMD_CHARGE_CONFIG: u8 = 0x94; // Charging configuration command
 const CMD_SETTINGS: u8 = 0x65;      // Settings
+#[allow(dead_code)]
 const CMD_UNKNOWN_25: u8 = 0x25;    // Large opaque blob (observed once)
+#[allow(dead_code)]
 const CMD_UNKNOWN_EA: u8 = 0xEA;    // Large opaque blob (observed once)
 
 /// High-level start/stop intent for 0x93 commands
@@ -308,6 +314,12 @@ impl BatteryChemistry {
             BatteryChemistry::LTO => "LTO",
             BatteryChemistry::NaIon => "Na-Ion",
         }
+    }
+}
+
+impl Default for MC5000Protocol {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -565,9 +577,7 @@ impl MC5000Protocol {
         
         // Bytes 35-39: Padding (always zeros in captures, 5 bytes to reach 40 total data bytes)
         // Verified: capture packets are 44 bytes total = start(1) + length(1) + cmd(1) + data(40) + checksum(1)
-        for _ in 0..5 {
-            data.push(0x00);
-        }
+        data.extend([0x00u8; 5]);
         
         debug_assert_eq!(data.len(), 40, "Config data must be exactly 40 bytes");
         
@@ -1128,7 +1138,7 @@ impl ChargeConfig {
             discharge_cutoff_current_ma: 100,
             trickle_charge_ma: 0, // Default off; NiMH typically 50mA when configured
             keep_voltage_mv: 0,   // Default off; NiMH typically 1300mV when configured
-            delta_peak_mv: if chemistry.uses_delta_peak() { 6 } else { 6 }, // App always sends 6, even for lithium
+            delta_peak_mv: 6, // App always sends 6, even for lithium
             cutoff_timer_min: 0,  // Default off (0 = no timer); set explicitly when needed
             max_time_min: 300,    // 5 hours
             cycle_direction: 0x00, // C→D default
@@ -1179,6 +1189,7 @@ impl ChargeConfig {
     /// In capture 4, storage mode sends:
     /// - target_voltage = charge limit (4200mV for Li-Ion), NOT the storage voltage
     /// - secondary value (cap2) = storage voltage (3800mV for Li-Ion)
+    ///
     /// The storage_voltage_mv parameter is informational; the actual storage voltage
     /// is determined by chemistry.storage_voltage_mv() in the packet builder.
     pub fn liion_storage(slot: u8, capacity_mah: u16, _storage_voltage_mv: u16, charge_current_ma: u16, discharge_current_ma: u16) -> Self {

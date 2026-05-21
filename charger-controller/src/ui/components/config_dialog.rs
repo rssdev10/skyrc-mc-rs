@@ -58,7 +58,7 @@ impl ConfigDialogState {
         
         Self {
             chemistry,
-            mode: mode.clone(),
+            mode,
             capacity_input: config.capacity_mah.to_string(),
             charge_current_input: config.charge_current_ma.to_string(),
             discharge_current_input: config.discharge_current_ma.to_string(),
@@ -79,7 +79,7 @@ impl ConfigDialogState {
 
     pub fn update_chemistry(&mut self, new_chemistry: BatteryChemistry) {
         self.chemistry = new_chemistry;
-        self.config = ChargeConfig::default_for_chemistry_and_mode(new_chemistry, self.mode.clone());
+        self.config = ChargeConfig::default_for_chemistry_and_mode(new_chemistry, self.mode);
         
         // Update all input fields with new defaults
         self.capacity_input = self.config.capacity_mah.to_string();
@@ -99,7 +99,7 @@ impl ConfigDialogState {
     }
 
     pub fn update_mode(&mut self, new_mode: ChargeMode) {
-        self.mode = new_mode.clone();
+        self.mode = new_mode;
         self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, new_mode);
         
         // Update all input fields
@@ -120,7 +120,7 @@ impl ConfigDialogState {
     }
 
     pub fn reset_to_defaults(&mut self) {
-        self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, self.mode.clone());
+        self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, self.mode);
         self.capacity_input = self.config.capacity_mah.to_string();
         self.charge_current_input = self.config.charge_current_ma.to_string();
         self.discharge_current_input = self.config.discharge_current_ma.to_string();
@@ -205,7 +205,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
     
     let mode_picker = pick_list(
         available_modes,
-        Some(state.mode.clone()),
+        Some(state.mode),
         AppMessage::ConfigModeChanged,
     )
     .placeholder("Select mode")
@@ -422,7 +422,7 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
                 .on_press(AppMessage::ConfigDialogDefault)
                 .padding(10)
                 .style(button::secondary),
-            iced::widget::space::horizontal(),
+            iced::widget::space::horizontal().width(30.0),
             button(text(action_text))
                 .on_press(AppMessage::ConfigDialogConfirm)
                 .padding(10)

@@ -13,6 +13,7 @@ use crate::data::DataLogger;
 
 use components::{device_panel, slot_panel, graph_panel, data_panel};
 
+#[allow(clippy::too_many_arguments)]
 pub fn main_view<'a>(
     device_manager: &'a DeviceManager,
     connected_device: &'a Option<Device>,

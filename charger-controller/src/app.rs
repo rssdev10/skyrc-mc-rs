@@ -16,6 +16,7 @@ use crate::ui;
 use crate::config_dialog::{ChargeMode};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AppMessage {
     Tick,
     NotificationReceived(Vec<u8>),
@@ -71,6 +72,7 @@ pub enum AppMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SlotMessage {
     UpdateState(SlotState),
     UpdateMeasurement(f32, f32), // voltage, current
@@ -206,7 +208,7 @@ impl ChargerApp {
             println!("[APP VERBOSE] Creating device manager and initializing slots...");
         }
         
-        let mut app = ChargerApp {
+        let app = ChargerApp {
             device_manager: DeviceManager::new(),
             connected_device: None,
             slots: [
@@ -256,6 +258,7 @@ impl ChargerApp {
         (app, scan_command)
     }
 
+    #[allow(dead_code)]
     pub fn title(&self) -> String {
         "MC5000 Charger Controller".to_string()
     }
@@ -560,7 +563,7 @@ impl ChargerApp {
                 self.scanning = true;  // Start scanning, disable UI
                 
                 // Start async scan
-                return Task::perform(
+                Task::perform(
                     async {
                         let mut device_manager = DeviceManager::new();
                         match device_manager.scan_bluetooth_devices().await {
@@ -572,7 +575,7 @@ impl ChargerApp {
                         }
                     },
                     AppMessage::BluetoothScanComplete
-                );
+                )
             }
             
             AppMessage::DisconnectDevice => {
@@ -1324,7 +1327,7 @@ impl ChargerApp {
             AppMessage::FileSelectedAllSamples(path) => {
                 if let Some(path) = path {
                     let measurements = self.data_logger.get_all_measurements();
-                    if let Err(e) = self.csv_exporter.export_to_file(&path, &measurements) {
+                    if let Err(e) = self.csv_exporter.export_to_file(&path, measurements) {
                         log::error!("Failed to export all samples: {}", e);
                         eprintln!("Failed to export all samples: {}", e);
                     } else {
@@ -1348,7 +1351,7 @@ impl ChargerApp {
 
     pub fn view(&self) -> Element<'_, AppMessage> {
         let verbose = std::env::var("MC5000_VERBOSE").is_ok();
-        if verbose && self.update_counter % 10 == 0 {
+        if verbose && self.update_counter.is_multiple_of(10) {
             use std::io::Write;
             println!("[GUI VERBOSE] View rendered, update_counter: {}", self.update_counter);
             let _ = std::io::stdout().flush();

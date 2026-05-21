@@ -42,6 +42,7 @@ pub struct TaskConfig {
     pub discharge_current_ma: u16,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatteryChemistry {
     LiIon,      // 4.2V
@@ -72,7 +73,7 @@ impl BatteryChemistry {
     }
 
     /// Convert slot chemistry to bluetooth chemistry
-    pub fn to_bluetooth_chemistry(&self) -> mc5000_protocol::BatteryChemistry {
+    pub fn to_bluetooth_chemistry(self) -> mc5000_protocol::BatteryChemistry {
         match self {
             BatteryChemistry::LiIon => mc5000_protocol::BatteryChemistry::LiIon,
             BatteryChemistry::LiIonHV => mc5000_protocol::BatteryChemistry::LiIonHV,
@@ -181,6 +182,7 @@ impl Slot {
         log::info!("Stopped task on slot {}", self.id.0);
     }
 
+    #[allow(dead_code)]
     pub fn pause(&mut self) {
         if self.is_active() {
             self.state = SlotState::Paused;
@@ -188,6 +190,7 @@ impl Slot {
         }
     }
 
+    #[allow(dead_code)]
     pub fn resume(&mut self) {
         if self.state == SlotState::Paused {
             if let Some(ref task) = self.current_task {
@@ -256,7 +259,7 @@ impl Slot {
         }
         
         // Determine chemistry and voltage limits
-        let (vmax, vmin, chemistry) = if let Some(ref task) = self.current_task {
+        let (vmax, vmin, _chemistry) = if let Some(ref task) = self.current_task {
             // Use task configuration when available
             let (v_max, v_min) = match &task.task_type {
                 TaskType::Charge => {
@@ -298,7 +301,7 @@ impl Slot {
         let progress = (v_compensated - vmin) / (vmax - vmin);
         
         // Clip to [0, 1] and convert to percentage
-        progress.max(0.0).min(1.0) * 100.0
+        progress.clamp(0.0, 1.0) * 100.0
     }
     
     pub fn estimate_chemistry_from_voltage(&self) -> BatteryChemistry {

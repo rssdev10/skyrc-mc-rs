@@ -399,11 +399,15 @@ async fn run_scan(verbose: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn is_valid_slot(slot: u8) -> bool {
+    (1..=4).contains(&slot)
+}
+
 async fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
     let (protocol, peripheral) = connect_to_device_readonly(verbose).await?;
     
     let slots = match slot {
-        Some(s) if s >= 1 && s <= 4 => vec![s],
+        Some(s) if is_valid_slot(s) => vec![s],
         Some(s) => return Err(format!("Invalid slot: {}. Must be 1-4", s).into()),
         None => vec![1, 2, 3, 4],
     };
@@ -495,7 +499,7 @@ async fn run_charge(
     current: u16, 
     capacity: u16
 ) -> Result<(), Box<dyn Error>> {
-    if slot < 1 || slot > 4 {
+    if !is_valid_slot(slot) {
         return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
     }
     
@@ -563,7 +567,7 @@ async fn run_discharge(
     current: u16, 
     capacity: u16
 ) -> Result<(), Box<dyn Error>> {
-    if slot < 1 || slot > 4 {
+    if !is_valid_slot(slot) {
         return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
     }
     
@@ -628,7 +632,7 @@ async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>>
     let (protocol, _peripheral) = connect_to_device(verbose).await?;
     
     match slot {
-        Some(s) if s >= 1 && s <= 4 => {
+        Some(s) if is_valid_slot(s) => {
             println!("Stopping slot {}...", s);
             let stop_cmd = MC5000Protocol::build_start_stop_command(
                 StartStopAction::ChannelMask(1 << (s - 1))
@@ -655,7 +659,7 @@ async fn run_cycle(
     current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if slot < 1 || slot > 4 {
+    if !is_valid_slot(slot) {
         return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
     }
     
@@ -699,7 +703,7 @@ async fn run_refresh(
     discharge_current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if slot < 1 || slot > 4 {
+    if !is_valid_slot(slot) {
         return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
     }
     
@@ -748,7 +752,7 @@ async fn run_break_in(
     current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if slot < 1 || slot > 4 {
+    if !is_valid_slot(slot) {
         return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
     }
     
@@ -793,7 +797,7 @@ async fn run_auto(verbose: bool, slot: Option<u8>, initial_current: u16) -> Resu
     let (protocol, _peripheral) = connect_to_device(verbose).await?;
     
     let slots = match slot {
-        Some(s) if s >= 1 && s <= 4 => vec![s],
+        Some(s) if is_valid_slot(s) => vec![s],
         Some(s) => return Err(format!("Invalid slot: {}. Must be 1-4", s).into()),
         None => vec![1, 2, 3, 4],
     };
@@ -1146,7 +1150,7 @@ async fn run_proto3(verbose: bool) -> Result<(), Box<dyn Error>> {
     let slot_status: Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>> = 
         Arc::new(Mutex::new(HashMap::new()));
     let slot_status_clone = slot_status.clone();
-    let verbose_clone = verbose;
+    let _verbose_clone = verbose;
     
     let peripheral_clone = _peripheral.clone();
     let notification_task = tokio::spawn(async move {
@@ -1258,6 +1262,7 @@ async fn run_proto3(verbose: bool) -> Result<(), Box<dyn Error>> {
 /// 2. CONFIG slot 4 (storage) — update on-the-fly  
 /// 3. STOP_ALL (0x00)
 /// 4. CONFIG slot 1 (NiMH) → START (0x01) → CONFIG slot 2 (NiCd)
+///
 /// 5-10. Further configs and starts for LiFePO4, LiHV, RAM, etc.
 async fn run_proto4(verbose: bool, dry_run: bool) -> Result<(), Box<dyn Error>> {
     use std::sync::Mutex;

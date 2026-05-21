@@ -42,6 +42,7 @@ pub enum DeviceError {
 
 pub struct DeviceManager {
     available_devices: Vec<String>,
+    #[allow(dead_code)]
     device_configs: HashMap<String, DeviceConfig>,
     bluetooth_devices: Vec<DiscoveredBluetoothDevice>,
 }
@@ -52,6 +53,12 @@ pub struct DeviceConfig {
     pub port: String,
     pub baud_rate: u32,
     pub protocol_version: String,
+}
+
+impl Default for DeviceManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DeviceManager {
@@ -83,7 +90,6 @@ impl DeviceManager {
                 self.bluetooth_devices = devices;
                 // Add Bluetooth devices to available devices list
                 let mut mc5000_devices = Vec::new();
-                let mut other_devices = Vec::new();
                 
                 for bt_device in &self.bluetooth_devices {
                     if bt_device.is_mc5000 {
@@ -99,11 +105,6 @@ impl DeviceManager {
                 
                 // Sort MC5000 devices first, then other devices
                 for device in mc5000_devices {
-                    if !self.available_devices.contains(&device) {
-                        self.available_devices.push(device);
-                    }
-                }
-                for device in other_devices {
                     if !self.available_devices.contains(&device) {
                         self.available_devices.push(device);
                     }
@@ -184,7 +185,7 @@ impl DeviceManager {
         let bt_device = self.bluetooth_devices
             .iter()
             .find(|d| d.id == peripheral_id || d.name == selected_name)
-            .ok_or_else(|| DeviceError::DeviceNotFound)?;
+            .ok_or(DeviceError::DeviceNotFound)?;
 
         if verbose {
             println!("[DEVICE VERBOSE] Found device: {}", bt_device.name);
@@ -257,15 +258,16 @@ impl DeviceManager {
         // Note: Serial port scanning is disabled, focusing on Bluetooth connections
         // To add serial port support, add the serialport crate and uncomment scanning code
         
-        let devices = Vec::new();
+        
         
         // Serial port scanning disabled - Bluetooth is the primary interface
         // Add mock devices for testing if needed
         // devices.push("Mock Charger #1".to_string());
         
-        devices
+        Vec::new()
     }
 
+    #[allow(dead_code)]
     fn identify_device(port_name: &str) -> Result<String, DeviceError> {
         // In a real implementation, open the port and send identification command
         // For now, return a mock name

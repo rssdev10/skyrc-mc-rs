@@ -17,6 +17,7 @@ pub enum ExportError {
 }
 
 /// Export mode selection
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportMode {
     /// Time-aligned format: all slots in one row, averaged per second (default)
@@ -57,7 +58,7 @@ impl TimeAlignedCsvFormat {
     pub fn write_header_for_aligned<W: Write>(&self, writer: &mut W) -> Result<(), ExportError> {
         if self.include_header {
             let mut csv_writer = Writer::from_writer(writer);
-            csv_writer.write_record(&[
+            csv_writer.write_record([
                 "timestamp",
                 // Slot 1
                 "slot1_current_mA", "slot1_voltage_V", "slot1_state", "slot1_mode", "slot1_resistance_mOhm", "slot1_elapsed_time_sec",
@@ -110,7 +111,7 @@ impl ExportFormat for CsvFormat {
     fn write_header<W: Write>(&self, writer: &mut W) -> Result<(), ExportError> {
         if self.include_header {
             let mut csv_writer = Writer::from_writer(writer);
-            csv_writer.write_record(&[
+            csv_writer.write_record([
                 "timestamp",
                 "slot",
                 "current_mA",
@@ -188,6 +189,7 @@ impl<F: ExportFormat> DataExporter<F> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn export_slot_to_file<P: AsRef<Path>>(
         &self,
         path: P,
@@ -220,6 +222,7 @@ impl<F: ExportFormat> DataExporter<F> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn export_to_string(&self, measurements: &[MeasurementPoint]) -> Result<String, ExportError> {
         // Filter out Empty slots
         let filtered_measurements: Vec<_> = measurements
