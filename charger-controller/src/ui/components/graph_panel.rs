@@ -1,5 +1,5 @@
 use iced::{
-    widget::{canvas, column, container, text},
+    widget::{canvas, container},
     Element, Length, Size, Point, Color, mouse,
 };
 use iced::widget::canvas::Text;
@@ -10,20 +10,15 @@ use crate::slot::{Slot, SlotId};
 
 pub fn view<'a>(data_logger: &'a DataLogger, slots: &'a [Slot; 4], selected_slot: Option<usize>) -> Element<'a, AppMessage> {
     let graph_canvas = canvas(GraphCanvas::new(data_logger, slots, selected_slot))
-        .width(Length::FillPortion(2))
-        .height(300);
+        .width(Length::Fill)
+        .height(Length::Fill);
 
-    container(
-        column![
-            text("Voltage & Current Graph").size(16),
-            graph_canvas,
-        ]
-        .spacing(10)
-        .padding(15)
-    )
-    .style(container::bordered_box)
-    .width(Length::FillPortion(2))
-    .into()
+    container(graph_canvas)
+        .style(container::bordered_box)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(5)
+        .into()
 }
 
 struct GraphCanvas<'a> {
@@ -61,8 +56,8 @@ impl<'a> canvas::Program<AppMessage> for GraphCanvas<'a> {
         let margin_top = 20.0;
         let margin_bottom = 40.0;
         
-        let graph_width = bounds.width - margin_left - margin_right;
-        let graph_height = bounds.height - margin_top - margin_bottom;
+        let _graph_width = bounds.width - margin_left - margin_right;
+        let _graph_height = bounds.height - margin_top - margin_bottom;
         
         // Draw background
         frame.fill_rectangle(

@@ -60,3 +60,5 @@ settings.json
 *.zip
 *.app
 **/logs
+
+prompts/

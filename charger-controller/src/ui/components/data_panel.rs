@@ -1,6 +1,5 @@
 use iced::{
-    widget::{button, column, container, row as iced_row, rule, scrollable, text},
-    Element, Length,
+    Element, Length, widget::{button, column, container, row as iced_row, rule, scrollable, space::horizontal, text}
 };
 
 use crate::app::AppMessage;
@@ -35,15 +34,20 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<'_, 
 
     // Export controls
     let export_controls = iced_row![
-        button("Export CSV")
-            .on_press(AppMessage::ExportAllSamples),
-        button("Export Time-Aligned")
-            .on_press(AppMessage::ExportTimeAligned),
-        button("Clear Data")
+        column![
+            button("Export CSV")
+                .on_press(AppMessage::ExportAllSamples),
+            
+            button("Export Time-Aligned")
+                .on_press(AppMessage::ExportTimeAligned),
+        ].spacing(10),
+        horizontal(),
+        button("Clear Record Data")
             .on_press(AppMessage::ClearData)
             .style(button::danger),
     ]
-    .spacing(10);
+    .spacing(10)
+    .align_y(iced::alignment::Vertical::Center);
 
     // Toggle button for event stream log
     let toggle_text = if show_detailed_stats { "▼ Hide Event Stream" } else { "▶ Show Event Stream" };

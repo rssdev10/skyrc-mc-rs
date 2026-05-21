@@ -119,6 +119,24 @@ impl ConfigDialogState {
         self.cycle_count_input = self.config.cycle_count.to_string();
     }
 
+    pub fn reset_to_defaults(&mut self) {
+        self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, self.mode.clone());
+        self.capacity_input = self.config.capacity_mah.to_string();
+        self.charge_current_input = self.config.charge_current_ma.to_string();
+        self.discharge_current_input = self.config.discharge_current_ma.to_string();
+        self.target_voltage_input = format!("{:.2}", self.config.target_voltage_mv as f32 / 1000.0);
+        self.cutoff_voltage_input = format!("{:.2}", self.config.cutoff_voltage_mv as f32 / 1000.0);
+        self.storage_voltage_input = self.config.storage_voltage_mv.map(|v| format!("{:.2}", v as f32 / 1000.0)).unwrap_or_default();
+        self.delta_peak_input = self.config.delta_peak_mv.to_string();
+        self.trickle_charge_input = self.config.trickle_charge_ma.to_string();
+        self.cutoff_timer_input = self.config.cutoff_timer_min.to_string();
+        self.charge_cutoff_current_input = self.config.charge_cutoff_current_ma.to_string();
+        self.discharge_cutoff_current_input = self.config.discharge_cutoff_current_ma.to_string();
+        self.charge_resting_input = self.config.charge_resting_min.to_string();
+        self.discharge_resting_input = self.config.discharge_resting_min.to_string();
+        self.cycle_count_input = self.config.cycle_count.to_string();
+    }
+
     pub fn get_config(&self) -> ChargeConfig {
         let mut config = self.config.clone();
         
@@ -400,12 +418,17 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
             button(text("Cancel"))
                 .on_press(AppMessage::ConfigDialogCancel)
                 .padding(10),
+            button(text("Default"))
+                .on_press(AppMessage::ConfigDialogDefault)
+                .padding(10)
+                .style(button::secondary),
+            iced::widget::space::horizontal(),
             button(text(action_text))
                 .on_press(AppMessage::ConfigDialogConfirm)
                 .padding(10)
                 .style(button::primary),
         ]
-        .spacing(20)
+        .spacing(10)
         .padding(iced::Padding { top: 20.0, right: 0.0, bottom: 0.0, left: 0.0 })
     );
 

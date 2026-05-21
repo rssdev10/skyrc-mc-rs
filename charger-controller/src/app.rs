@@ -58,6 +58,7 @@ pub enum AppMessage {
     ConfigCycleCountChanged(String),
     ConfigDialogCancel,
     ConfigDialogConfirm,
+    ConfigDialogDefault,  // Reset to defaults for current chemistry+mode
     SimpleAutoCharge,  // Simple auto: detect Li-Ion/NiMH, charge at 500mA
     SmartChargeAll,    // Smart charge: detect chemistry, measure resistance, optimize current
     StopAllSlots,      // Stop all active slots
@@ -92,6 +93,7 @@ pub struct ChargerApp {
     selected_slot: Option<usize>,  // Track selected slot for graph display
     config_dialog_state: Option<crate::ui::components::config_dialog::ConfigDialogState>,
     pending_slot: Option<SlotId>,
+    saved_slot_configs: [Option<crate::ui::components::config_dialog::ConfigDialogState>; 4],  // Persist config per slot
     auto_charge_pending: Vec<SlotId>,  // Slots waiting for resistance measurement in auto-charge mode
     show_detailed_stats: bool,  // Toggle for detailed per-slot sample stream
 }
@@ -226,6 +228,7 @@ impl ChargerApp {
             selected_slot: Some(0),  // Default to first slot selected
             config_dialog_state: None,
             pending_slot: None,
+            saved_slot_configs: [None, None, None, None],
             auto_charge_pending: Vec::new(),
             show_detailed_stats: false,  // Default: hide detailed per-slot stream
         };
@@ -720,9 +723,13 @@ impl ChargerApp {
             
             AppMessage::ShowConfigDialog(slot_index, voltage) => {
                 self.pending_slot = Some(slot_index);
-                self.config_dialog_state = Some(crate::ui::components::config_dialog::ConfigDialogState::new(
-                    voltage,  // Voltage-based chemistry detection
-                ));
+                // Restore saved config for this slot, or create a new one
+                let state = if let Some(saved) = self.saved_slot_configs[slot_index.0].clone() {
+                    saved
+                } else {
+                    crate::ui::components::config_dialog::ConfigDialogState::new(voltage)
+                };
+                self.config_dialog_state = Some(state);
                 Task::none()
             }
             
@@ -839,8 +846,19 @@ impl ChargerApp {
             }
             
             AppMessage::ConfigDialogCancel => {
+                // Save current state for this slot before closing
+                if let (Some(state), Some(slot_id)) = (&self.config_dialog_state, self.pending_slot) {
+                    self.saved_slot_configs[slot_id.0] = Some(state.clone());
+                }
                 self.config_dialog_state = None;
                 self.pending_slot = None;
+                Task::none()
+            }
+
+            AppMessage::ConfigDialogDefault => {
+                if let Some(state) = &mut self.config_dialog_state {
+                    state.reset_to_defaults();
+                }
                 Task::none()
             }
             
@@ -854,7 +872,8 @@ impl ChargerApp {
                     let chemistry = state.chemistry;
                     let mode = state.mode;
                     
-                    // Close dialog
+                    // Save config for this slot, then close dialog
+                    self.saved_slot_configs[slot_id.0] = Some(state.clone());
                     self.config_dialog_state = None;
                     self.pending_slot = None;
                     
