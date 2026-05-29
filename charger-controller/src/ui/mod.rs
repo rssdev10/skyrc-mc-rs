@@ -7,6 +7,7 @@ use iced::{
 };
 
 use crate::app::{AppMessage, ConnectionStatus};
+use crate::i18n::t;
 use mc5000_protocol::{Device, DeviceManager};
 use crate::slot::{Slot, SlotId, TaskConfig};
 use crate::data::DataLogger;
@@ -27,10 +28,11 @@ pub fn main_view<'a>(
     selected_slot: Option<usize>,
     config_dialog_state: &'a Option<components::config_dialog::ConfigDialogState>,
     show_detailed_stats: bool,
+    profile_store: &'a crate::profiles::ProfileStore,
 ) -> Element<'a, AppMessage> {
     // If config dialog is active, show it instead of the main view
     if let Some(state) = config_dialog_state {
-        return components::config_dialog::view_config_dialog(state);
+        return components::config_dialog::view_config_dialog(state, profile_store);
     }
 
     // Device panel on top (connection controls + status)
@@ -80,34 +82,34 @@ fn create_slots_section<'a>(
 
     // Auto/SmartCharge/Stop All buttons aligned right
     let auto_button = if is_connected {
-        button(text("Auto").size(14))
+        button(text(t!("btn.auto").to_string()).size(14))
             .on_press(AppMessage::SimpleAutoCharge)
             .padding([4, 10])
             .style(button::primary)
     } else {
-        button(text("Auto").size(14)).padding([4, 10])
+        button(text(t!("btn.auto").to_string()).size(14)).padding([4, 10])
     };
 
     let smart_button = if is_connected {
-        button(text("SmartCharge").size(14))
+        button(text(t!("btn.smart_charge").to_string()).size(14))
             .on_press(AppMessage::SmartChargeAll)
             .padding([4, 10])
             .style(button::secondary)
     } else {
-        button(text("SmartCharge").size(14)).padding([4, 10])
+        button(text(t!("btn.smart_charge").to_string()).size(14)).padding([4, 10])
     };
 
     let stop_all_button = if is_connected {
-        button(text("Stop All").size(14))
+        button(text(t!("btn.stop_all").to_string()).size(14))
             .on_press(AppMessage::StopAllSlots)
             .padding([4, 10])
             .style(button::danger)
     } else {
-        button(text("Stop All").size(14)).padding([4, 10])
+        button(text(t!("btn.stop_all").to_string()).size(14)).padding([4, 10])
     };
 
     let header_row = row![
-        text("Charging Slots").size(18),
+        text(t!("label.charging_slots").to_string()).size(18),
         iced::widget::space::horizontal(),
         auto_button,
         smart_button,

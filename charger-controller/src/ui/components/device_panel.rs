@@ -4,6 +4,7 @@ use iced::{
 };
 
 use crate::app::{AppMessage, ConnectionStatus};
+use crate::i18n::t;
 use mc5000_protocol::{Device, DeviceManager};
 
 pub fn view<'a>(
@@ -14,20 +15,20 @@ pub fn view<'a>(
     scanning: bool,
 ) -> Element<'a, AppMessage> {
     let status_text: Element<AppMessage> = match connection_status {
-        ConnectionStatus::Disconnected => text("⊘ Disconnected")
-            .size(13)
+        ConnectionStatus::Disconnected => text(t!("label.disconnected").to_string())
+            .size(14)
             .color(iced::Color::from_rgb(0.8, 0.2, 0.2))
             .into(),
-        ConnectionStatus::Connecting => text("⟳ Connecting...")
-            .size(13)
+        ConnectionStatus::Connecting => text(t!("label.connecting").to_string())
+            .size(14)
             .color(iced::Color::from_rgb(0.2, 0.6, 1.0))
             .into(),
-        ConnectionStatus::Connected => text("● Connected")
-            .size(13)
+        ConnectionStatus::Connected => text(t!("label.connected").to_string())
+            .size(14)
             .color(iced::Color::from_rgb(0.2, 0.8, 0.2))
             .into(),
         ConnectionStatus::Error(msg) => text(format!("⚠ {}", msg))
-            .size(13)
+            .size(14)
             .color(iced::Color::from_rgb(0.8, 0.2, 0.2))
             .into(),
     };
@@ -36,9 +37,9 @@ pub fn view<'a>(
         let available_devices = device_manager.get_available_devices().to_vec();
 
         let device_picker: Element<AppMessage> = if scanning {
-            text("⟳ Scanning...").size(13).into()
+            text(t!("label.scanning").to_string()).size(14).into()
         } else if available_devices.is_empty() {
-            text("No devices found").size(13).into()
+            text(t!("label.no_devices").to_string()).size(14).into()
         } else {
             pick_list(
                 available_devices,
@@ -49,11 +50,11 @@ pub fn view<'a>(
             .into()
         };
 
-        let refresh_button = button(text("Refresh").size(13))
+        let refresh_button = button(text(t!("btn.refresh").to_string()).size(14))
             .on_press_maybe(if scanning { None } else { Some(AppMessage::RefreshDevices) })
             .padding([4, 8]);
 
-        let connect_button = button(text("Connect").size(13))
+        let connect_button = button(text(t!("btn.connect").to_string()).size(14))
             .on_press_maybe(
                 if selected_device.is_some() && *connection_status != ConnectionStatus::Connecting {
                     Some(AppMessage::ConnectDevice)
@@ -69,19 +70,11 @@ pub fn view<'a>(
             .into()
     } else {
         let name = &connected_device.as_ref().unwrap().name;
-        // For BT devices: "MC5000 BT: #Charger XXXX (ID:...)" → show just "#Charger XXXX"
-        // let display_name = if name.starts_with("MC5000 BT: ") {
-        //     name.strip_prefix("MC5000 BT: ")
-        //         .and_then(|s| s.find(" (ID:").map(|pos| s[..pos].to_string()))
-        //         .unwrap_or_else(|| name.clone())
-        // } else {
-        //     name.clone()
-        // };
-        let display_name = name.clone();  // Show full name for now, can simplify if needed
+        let display_name = name.clone();
 
         row![
-            text(format!("Connected to: {}", display_name)).size(13),
-            button(text("Disconnect").size(13))
+            text(format!("{} {}", t!("label.connected_to"), display_name)).size(14),
+            button(text(t!("btn.disconnect").to_string()).size(14))
                 .on_press(AppMessage::DisconnectDevice)
                 .style(button::danger)
                 .padding([4, 8]),

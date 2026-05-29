@@ -1,9 +1,10 @@
 use iced::{
-    widget::{button, column, container, pick_list, row, text, text_input},
+    widget::{button, column, container, pick_list, row, scrollable, text, text_input},
     Element, Length,
 };
 
 use crate::config_dialog::{ChargeConfig, ChargeMode};
+use crate::i18n::t;
 use crate::slot::BatteryChemistry;
 use crate::app::AppMessage;
 
@@ -28,6 +29,12 @@ pub struct ConfigDialogState {
     pub charge_resting_input: String,
     pub discharge_resting_input: String,
     pub cycle_count_input: String,
+    
+    // Profile management
+    pub profile_name_input: String,
+    pub selected_profile: Option<usize>,
+    pub config_modified: bool, // Track if config was changed since profile was applied
+    pub deleted_profile: Option<crate::profiles::Profile>, // For undo support
 }
 
 impl ConfigDialogState {
@@ -74,6 +81,10 @@ impl ConfigDialogState {
             discharge_resting_input: config.discharge_resting_min.to_string(),
             cycle_count_input: config.cycle_count.to_string(),
             config,
+            profile_name_input: String::new(),
+            selected_profile: None,
+            config_modified: false,
+            deleted_profile: None,
         }
     }
 
@@ -187,47 +198,66 @@ impl ConfigDialogState {
         
         config
     }
+
+    pub fn apply_profile(&mut self, profile: &crate::profiles::Profile) {
+        self.chemistry = profile.chemistry;
+        self.mode = profile.mode;
+        self.config = profile.config.clone();
+        self.profile_name_input = profile.name.clone();
+        
+        self.capacity_input = self.config.capacity_mah.to_string();
+        self.charge_current_input = self.config.charge_current_ma.to_string();
+        self.discharge_current_input = self.config.discharge_current_ma.to_string();
+        self.target_voltage_input = format!("{:.2}", self.config.target_voltage_mv as f32 / 1000.0);
+        self.cutoff_voltage_input = format!("{:.2}", self.config.cutoff_voltage_mv as f32 / 1000.0);
+        self.storage_voltage_input = self.config.storage_voltage_mv.map(|v| format!("{:.2}", v as f32 / 1000.0)).unwrap_or_default();
+        self.delta_peak_input = self.config.delta_peak_mv.to_string();
+        self.trickle_charge_input = self.config.trickle_charge_ma.to_string();
+        self.cutoff_timer_input = self.config.cutoff_timer_min.to_string();
+        self.charge_cutoff_current_input = self.config.charge_cutoff_current_ma.to_string();
+        self.discharge_cutoff_current_input = self.config.discharge_cutoff_current_ma.to_string();
+        self.charge_resting_input = self.config.charge_resting_min.to_string();
+        self.discharge_resting_input = self.config.discharge_resting_min.to_string();
+        self.cycle_count_input = self.config.cycle_count.to_string();
+    }
 }
 
-pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> {
-    // Battery type picker
+pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a crate::profiles::ProfileStore) -> Element<'a, AppMessage> {
+    // === LEFT COLUMN: Configuration fields ===
     let all_chemistries = BatteryChemistry::all();
     let chemistry_picker = pick_list(
         all_chemistries,
         Some(state.chemistry),
         AppMessage::ConfigChemistryChanged,
     )
-    .placeholder("Select battery type")
+    .placeholder(t!("config.battery_type").to_string())
     .width(Length::Fixed(200.0));
 
-    // Mode picker - filtered by chemistry
     let available_modes = ChargeMode::available_for_chemistry(state.chemistry);
-    
     let mode_picker = pick_list(
         available_modes,
         Some(state.mode),
         AppMessage::ConfigModeChanged,
     )
-    .placeholder("Select mode")
+    .placeholder(t!("config.mode").to_string())
     .width(Length::Fixed(200.0));
 
-    let mut content = column![
-        text("Battery Configuration")
-        .size(24),
-        row![text("Battery Type: ").width(Length::Fixed(150.0)), chemistry_picker]
+    let mut left_col = column![
+        text(t!("config.title").to_string()).size(18),
+        row![text(format!("{}:", t!("config.battery_type"))).width(Length::Fixed(180.0)), chemistry_picker]
             .spacing(10)
             .align_y(iced::Center),
-        row![text("Mode: ").width(Length::Fixed(150.0)), mode_picker]
+        row![text(format!("{}:", t!("config.mode"))).width(Length::Fixed(180.0)), mode_picker]
             .spacing(10)
             .align_y(iced::Center),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(12)
+    .width(Length::FillPortion(3));
 
-    // Capacity (always shown)
-    content = content.push(
+    // Capacity
+    left_col = left_col.push(
         row![
-            text("Capacity (mAh):").width(Length::Fixed(200.0)),
+            text(format!("{} (mAh):", t!("config.capacity"))).width(Length::Fixed(180.0)),
             text_input("3000", &state.capacity_input)
                 .on_input(AppMessage::ConfigCapacityChanged)
                 .width(Length::Fixed(150.0))
@@ -236,11 +266,11 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         .align_y(iced::Center)
     );
 
-    // Charge current (for charge/cycle/storage modes)
+    // Charge current
     if state.config.charge_current_ma > 0 || matches!(state.mode, ChargeMode::Charge | ChargeMode::Cycle | ChargeMode::Storage) {
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Charge Current (mA):").width(Length::Fixed(200.0)),
+                text(format!("{} (mA):", t!("config.charge_current"))).width(Length::Fixed(180.0)),
                 text_input("1000", &state.charge_current_input)
                     .on_input(AppMessage::ConfigChargeCurrentChanged)
                     .width(Length::Fixed(150.0))
@@ -250,11 +280,11 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         );
     }
 
-    // Discharge current (for discharge/cycle/storage modes)
+    // Discharge current
     if state.config.discharge_current_ma > 0 || matches!(state.mode, ChargeMode::Discharge | ChargeMode::Cycle | ChargeMode::Storage | ChargeMode::Refresh) {
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Discharge Current (mA):").width(Length::Fixed(200.0)),
+                text(format!("{} (mA):", t!("config.discharge_current"))).width(Length::Fixed(180.0)),
                 text_input("1000", &state.discharge_current_input)
                     .on_input(AppMessage::ConfigDischargeCurrentChanged)
                     .width(Length::Fixed(150.0))
@@ -265,9 +295,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
     }
 
     // Target voltage
-    content = content.push(
+    left_col = left_col.push(
         row![
-            text("Target Voltage (V):").width(Length::Fixed(200.0)),
+            text(format!("{} (V):", t!("config.target_voltage"))).width(Length::Fixed(180.0)),
             text_input("4.2", &state.target_voltage_input)
                 .on_input(AppMessage::ConfigTargetVoltageChanged)
                 .width(Length::Fixed(150.0))
@@ -277,9 +307,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
     );
 
     // Cutoff voltage
-    content = content.push(
+    left_col = left_col.push(
         row![
-            text("Cutoff Voltage (V):").width(Length::Fixed(200.0)),
+            text(format!("{} (V):", t!("config.cutoff_voltage"))).width(Length::Fixed(180.0)),
             text_input("3.0", &state.cutoff_voltage_input)
                 .on_input(AppMessage::ConfigCutoffVoltageChanged)
                 .width(Length::Fixed(150.0))
@@ -288,11 +318,11 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         .align_y(iced::Center)
     );
 
-    // Storage voltage (for storage mode)
+    // Storage voltage
     if matches!(state.mode, ChargeMode::Storage) {
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Storage Voltage (V):").width(Length::Fixed(200.0)),
+                text(format!("{} (V):", t!("config.storage_voltage"))).width(Length::Fixed(180.0)),
                 text_input("3.8", &state.storage_voltage_input)
                     .on_input(AppMessage::ConfigStorageVoltageChanged)
                     .width(Length::Fixed(150.0))
@@ -302,11 +332,11 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         );
     }
 
-    // Delta-peak (for NiMH/NiCd/eneloop)
+    // Delta-peak (NiMH/NiCd)
     if matches!(state.chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop) {
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Delta Peak (mV):").width(Length::Fixed(200.0)),
+                text(format!("{} (mV):", t!("config.delta_peak"))).width(Length::Fixed(180.0)),
                 text_input("6", &state.delta_peak_input)
                     .on_input(AppMessage::ConfigDeltaPeakChanged)
                     .width(Length::Fixed(150.0))
@@ -314,11 +344,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
             .spacing(10)
             .align_y(iced::Center)
         );
-
-        // Trickle charge
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Trickle Charge (mA):").width(Length::Fixed(200.0)),
+                text(format!("{} (mA):", t!("config.trickle_charge"))).width(Length::Fixed(180.0)),
                 text_input("50", &state.trickle_charge_input)
                     .on_input(AppMessage::ConfigTrickleChargeChanged)
                     .width(Length::Fixed(150.0))
@@ -328,10 +356,10 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         );
     }
 
-    // Charge cutoff current
-    content = content.push(
+    // Charge/discharge cutoff currents
+    left_col = left_col.push(
         row![
-            text("Charge Cutoff Current (mA):").width(Length::Fixed(200.0)),
+            text(format!("{} (mA):", t!("config.charge_cutoff_current"))).width(Length::Fixed(180.0)),
             text_input("100", &state.charge_cutoff_current_input)
                 .on_input(AppMessage::ConfigChargeCutoffCurrentChanged)
                 .width(Length::Fixed(150.0))
@@ -339,11 +367,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         .spacing(10)
         .align_y(iced::Center)
     );
-
-    // Discharge cutoff current
-    content = content.push(
+    left_col = left_col.push(
         row![
-            text("Discharge Cutoff Current (mA):").width(Length::Fixed(200.0)),
+            text(format!("{} (mA):", t!("config.discharge_cutoff_current"))).width(Length::Fixed(180.0)),
             text_input("100", &state.discharge_cutoff_current_input)
                 .on_input(AppMessage::ConfigDischargeCutoffCurrentChanged)
                 .width(Length::Fixed(150.0))
@@ -353,9 +379,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
     );
 
     // Cutoff timer
-    content = content.push(
+    left_col = left_col.push(
         row![
-            text("Cutoff Timer (min, 0=off):").width(Length::Fixed(200.0)),
+            text(format!("{}:", t!("config.cutoff_timer_desc"))).width(Length::Fixed(180.0)),
             text_input("0", &state.cutoff_timer_input)
                 .on_input(AppMessage::ConfigCutoffTimerChanged)
                 .width(Length::Fixed(150.0))
@@ -366,9 +392,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
 
     // Cycle-specific parameters
     if matches!(state.mode, ChargeMode::Cycle | ChargeMode::Refresh | ChargeMode::BreakIn) {
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Charge Resting (min):").width(Length::Fixed(200.0)),
+                text(format!("{} (min):", t!("config.charge_resting"))).width(Length::Fixed(180.0)),
                 text_input("10", &state.charge_resting_input)
                     .on_input(AppMessage::ConfigChargeRestingChanged)
                     .width(Length::Fixed(150.0))
@@ -376,10 +402,9 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
             .spacing(10)
             .align_y(iced::Center)
         );
-
-        content = content.push(
+        left_col = left_col.push(
             row![
-                text("Discharge Resting (min):").width(Length::Fixed(200.0)),
+                text(format!("{} (min):", t!("config.discharge_resting"))).width(Length::Fixed(180.0)),
                 text_input("10", &state.discharge_resting_input)
                     .on_input(AppMessage::ConfigDischargeRestingChanged)
                     .width(Length::Fixed(150.0))
@@ -387,11 +412,10 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
             .spacing(10)
             .align_y(iced::Center)
         );
-
         if matches!(state.mode, ChargeMode::Cycle) {
-            content = content.push(
+            left_col = left_col.push(
                 row![
-                    text("Cycle Count:").width(Length::Fixed(200.0)),
+                    text(format!("{}:", t!("config.cycle_count"))).width(Length::Fixed(180.0)),
                     text_input("1", &state.cycle_count_input)
                         .on_input(AppMessage::ConfigCycleCountChanged)
                         .width(Length::Fixed(150.0))
@@ -402,23 +426,22 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
         }
     }
 
-    // Determine action button text based on mode
+    // Action buttons
     let action_text = match state.mode {
-        ChargeMode::Charge => "Start Charging",
-        ChargeMode::Storage => "Start Storage",
-        ChargeMode::Discharge => "Start Discharge",
-        ChargeMode::Cycle => "Start Cycle",
-        ChargeMode::Refresh => "Start Refresh",
-        ChargeMode::BreakIn => "Start Break-In",
+        ChargeMode::Charge => t!("config.start_charging").to_string(),
+        ChargeMode::Storage => t!("config.start_storage").to_string(),
+        ChargeMode::Discharge => t!("config.start_discharge").to_string(),
+        ChargeMode::Cycle => t!("config.start_cycle").to_string(),
+        ChargeMode::Refresh => t!("config.start_refresh").to_string(),
+        ChargeMode::BreakIn => t!("config.start_breakin").to_string(),
     };
 
-    // Buttons (macOS native order: Cancel on left, Action on right)
-    content = content.push(
+    left_col = left_col.push(
         row![
-            button(text("Cancel"))
+            button(text(t!("btn.cancel").to_string()))
                 .on_press(AppMessage::ConfigDialogCancel)
                 .padding(10),
-            button(text("Default"))
+            button(text(t!("btn.default").to_string()))
                 .on_press(AppMessage::ConfigDialogDefault)
                 .padding(10)
                 .style(button::secondary),
@@ -429,13 +452,112 @@ pub fn view_config_dialog(state: &ConfigDialogState) -> Element<'_, AppMessage> 
                 .style(button::primary),
         ]
         .spacing(10)
-        .padding(iced::Padding { top: 20.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(iced::Padding { top: 15.0, right: 0.0, bottom: 0.0, left: 0.0 })
     );
+
+    // === RIGHT COLUMN: Profile management ===
+    let auto_name = crate::profiles::Profile::generate_name(state.chemistry, state.mode, &state.get_config());
+    let placeholder_name = auto_name.clone();
+
+    // Title row with Export/Import buttons aligned right
+    let profile_title_row = row![
+        text(t!("config.profiles").to_string()).size(18),
+        iced::widget::space::horizontal().width(Length::Fill),
+        button(text(t!("config.export_profiles").to_string()).size(14))
+            .on_press(AppMessage::ConfigExportProfiles)
+            .padding([4, 8]),
+        button(text(t!("config.import_profiles").to_string()).size(14))
+            .on_press(AppMessage::ConfigImportProfiles)
+            .padding([4, 8]),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+
+    // Profile name input
+    let name_input = text_input(&placeholder_name, &state.profile_name_input)
+        .on_input(AppMessage::ConfigProfileNameChanged)
+        .width(Length::Fill)
+        .size(14);
+
+    // Create profile + Update buttons row
+    let update_btn = if state.config_modified && state.selected_profile.is_some() {
+        button(text(t!("config.update_profile").to_string()).size(14))
+            .on_press(AppMessage::ConfigUpdateProfile)
+            .padding([5, 10])
+    } else {
+        button(text(t!("config.update_profile").to_string()).size(14))
+            .padding([5, 10])
+    };
+
+    // Combined action row: Create/Update on left, Undo/Delete on right with fill space between
+    let action_row = {
+        let mut r = row![
+            button(text(t!("config.create_profile").to_string()).size(14))
+                .on_press(AppMessage::ConfigSaveProfile)
+                .padding([5, 10])
+                .style(button::primary),
+            update_btn,
+            iced::widget::space::horizontal().width(Length::Fill),
+        ];
+        if state.deleted_profile.is_some() {
+            r = r.push(
+                button(text(t!("config.undo_delete").to_string()).size(14))
+                    .on_press(AppMessage::ConfigUndoDelete)
+                    .padding([5, 10])
+                    .style(button::secondary)
+            );
+        }
+        r = r.push(
+            button(text(t!("config.delete_profile").to_string()).size(14))
+                .on_press_maybe(state.selected_profile.map(|_| AppMessage::ConfigDeleteProfile))
+                .padding([5, 10])
+                .style(button::danger)
+        );
+        r.spacing(5)
+    };
+
+    // Profile list (sorted alphabetically)
+    let sorted = profile_store.sorted_profiles();
+    let profile_list: Vec<Element<AppMessage>> = sorted
+        .iter()
+        .map(|(idx, profile)| {
+            let is_selected = state.selected_profile == Some(*idx);
+            let style = if is_selected { button::primary } else { button::secondary };
+            button(text(&profile.name).size(14))
+                .on_press(AppMessage::ConfigSelectProfile(*idx))
+                .padding([4, 8])
+                .width(Length::Fill)
+                .style(style)
+                .into()
+        })
+        .collect();
+
+    let profile_list_widget = scrollable(
+        column(profile_list).spacing(3)
+    )
+    .height(Length::Fill);
+
+    let right_col = column![
+        profile_title_row,
+        name_input,
+        action_row,
+        profile_list_widget,
+    ]
+    .spacing(8)
+    .width(Length::FillPortion(2));
+
+    // === Two-column layout ===
+    let content = row![
+        left_col,
+        iced::widget::rule::vertical(1),
+        right_col,
+    ]
+    .spacing(15)
+    .padding(20);
 
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(20)
         .into()
 }
 

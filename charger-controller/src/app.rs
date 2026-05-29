@@ -64,6 +64,17 @@ pub enum AppMessage {
     ConfigDialogCancel,
     ConfigDialogConfirm,
     ConfigDialogDefault,  // Reset to defaults for current chemistry+mode
+    // Profile management
+    ConfigProfileNameChanged(String),
+    ConfigSaveProfile,
+    ConfigUpdateProfile,  // Update selected profile with current config
+    ConfigDeleteProfile,
+    ConfigUndoDelete,     // Undo last profile deletion
+    ConfigSelectProfile(usize),
+    ConfigExportProfiles,
+    ConfigImportProfiles,
+    ConfigProfilesImported(Option<std::path::PathBuf>),
+    ConfigProfilesExported(Option<std::path::PathBuf>),
     SimpleAutoCharge,  // Simple auto: detect Li-Ion/NiMH, charge at 500mA
     SmartChargeAll,    // Smart charge: detect chemistry, measure resistance, optimize current
     StopAllSlots,      // Stop all active slots
@@ -77,6 +88,7 @@ pub enum AppMessage {
     SettingsOpen,
     SettingsClose,
     SettingsChangeTheme(crate::settings::AppTheme),
+    SettingsChangeLanguage(String),
     SettingsToggleSaveDevice,
     SettingsOpenRepo,
 }
@@ -110,6 +122,7 @@ pub struct ChargerApp {
     show_detailed_stats: bool,  // Toggle for detailed per-slot sample stream
     settings: crate::settings::Settings,
     show_settings: bool,
+    profile_store: crate::profiles::ProfileStore,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,6 +229,7 @@ impl ChargerApp {
         
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let settings = crate::settings::load();
+        crate::i18n::set_language(&settings.language);
         
         if verbose {
             println!("[APP VERBOSE] Creating device manager and initializing slots...");
@@ -248,6 +262,7 @@ impl ChargerApp {
             show_detailed_stats: false,  // Default: hide detailed per-slot stream
             settings,
             show_settings: false,
+            profile_store: crate::profiles::ProfileStore::load(),
         };
 
         if verbose {
@@ -312,7 +327,7 @@ impl ChargerApp {
     }
 
     pub fn title(&self) -> String {
-        format!("MC5000 Charger Controller v{}", env!("CARGO_PKG_VERSION"))
+        format!("{} v{}", crate::i18n::t!("app.title"), env!("CARGO_PKG_VERSION"))
     }
 
     pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
@@ -363,109 +378,130 @@ impl ChargerApp {
                                 status.elapsed_seconds
                             );
                             slot.set_state(map_bt_state(&status.state));
+                        }
+                        
+                        // Check if this slot is in auto-charge mode and has valid resistance
+                        let slot_id = SlotId(slot_idx);
+                        let elapsed_enough = self.slots.get(slot_idx)
+                            .and_then(|s| s.start_time)
+                            .map(|t| t.elapsed().as_secs() >= 5)
+                            .unwrap_or(false);
+                        let slot_is_active = self.slots.get(slot_idx).map(|s| s.is_active()).unwrap_or(false);
+                        
+                        if self.auto_charge_pending.contains(&slot_id) && 
+                           status.resistance_milliohm > 10 && // Valid resistance measurement
+                           elapsed_enough && // Wait for device to stabilize
+                           slot_is_active {
                             
-                            // Check if this slot is in auto-charge mode and has valid resistance
-                            let slot_id = SlotId(slot_idx);
-                            if self.auto_charge_pending.contains(&slot_id) && 
-                               status.resistance_milliohm > 10 && // Valid resistance measurement
-                               slot.is_active() {
+                            // Calculate optimal charge current based on resistance
+                            let resistance_ohm = status.resistance_milliohm as f32 / 1000.0;
+                            let capacity_mah = 3000.0; // Default capacity for auto-charge
+                            let base_current_1c = capacity_mah; // 1C current in mA
+                            
+                            // Calculate safe current: limit voltage drop to ~0.3V max
+                            let max_current_from_resistance = (300.0 / resistance_ohm) as u16; // in mA
+                            
+                            // Use conservative rate: 0.5C or resistance-limited, whichever is lower
+                            let target_current = ((base_current_1c * 0.5) as u16).min(max_current_from_resistance).max(300);
+                            
+                            if verbose {
+                                println!("[AUTO-CHARGE] Slot {}: R={}mΩ, adjusting current to {}mA (max from R: {}mA)",
+                                    slot_idx + 1, status.resistance_milliohm, target_current, max_current_from_resistance);
+                            }
+                            
+                            // Extract task data needed for config
+                            let task_data = self.slots.get(slot_idx)
+                                .and_then(|s| s.current_task.as_ref())
+                                .map(|task| (task.battery_chemistry, task.target_voltage, task.cutoff_voltage));
+                            
+                            if let Some((chemistry, target_voltage, cutoff_opt)) = task_data {
+                                let cutoff_voltage = cutoff_opt.unwrap_or(chemistry.cutoff_voltage());
                                 
-                                // Calculate optimal charge current based on resistance
-                                // Target: ~0.5C to 1C rate, capped by resistance
-                                // Higher resistance = lower safe current
-                                let resistance_ohm = status.resistance_milliohm as f32 / 1000.0;
-                                let capacity_mah = 3000.0; // Default capacity for auto-charge
-                                let base_current_1c = capacity_mah; // 1C current in mA
+                                let bt_chem = match chemistry {
+                                    BatteryChemistry::LiIon => BtChemistry::LiIon,
+                                    BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
+                                    BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
+                                    BatteryChemistry::NiMH => BtChemistry::NiMH,
+                                    BatteryChemistry::NiCd => BtChemistry::NiCd,
+                                    BatteryChemistry::Eneloop => BtChemistry::Eneloop,
+                                    BatteryChemistry::NiZn => BtChemistry::NiZn,
+                                    BatteryChemistry::RAM => BtChemistry::RAM,
+                                    BatteryChemistry::LTO => BtChemistry::LTO,
+                                    BatteryChemistry::NaIon => BtChemistry::NaIon,
+                                };
+                                let config = ChargeConfig {
+                                    channel_bitmask: 1 << slot_idx,
+                                    mode: OperationMode::Charge,
+                                    chemistry: bt_chem,
+                                    charge_current_ma: target_current,
+                                    discharge_current_ma: 0,
+                                    capacity_mah: capacity_mah as u16,
+                                    target_voltage_mv: (target_voltage * 1000.0) as u16,
+                                    cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
+                                    charge_cutoff_current_ma: 100,
+                                    discharge_cutoff_current_ma: 100,
+                                    trickle_charge_ma: if matches!(chemistry, BatteryChemistry::NiCd) { 50 } else { 0 },
+                                    keep_voltage_mv: 0,
+                                    delta_peak_mv: if matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop) { 6 } else { 0 },
+                                    cutoff_timer_min: 0,
+                                    max_time_min: 300,
+                                    cycle_direction: 0x00,
+                                    charge_resting_min: 10,
+                                    discharge_resting_min: 10,
+                                    cycle_count: 1,
+                                };
                                 
-                                // Calculate safe current: limit voltage drop to ~0.3V max
-                                // I = V_drop / R, using 0.3V as safe limit
-                                let max_current_from_resistance = (300.0 / resistance_ohm) as u16; // in mA
-                                
-                                // Use conservative rate: 0.5C or resistance-limited, whichever is lower
-                                let target_current = ((base_current_1c * 0.5) as u16).min(max_current_from_resistance).max(300);
-                                
-                                if verbose {
-                                    println!("[AUTO-CHARGE] Slot {}: R={}mΩ, adjusting current to {}mA (max from R: {}mA)",
-                                        slot_idx + 1, status.resistance_milliohm, target_current, max_current_from_resistance);
+                                // Compute combined active mask
+                                let mut active_mask: u8 = 0;
+                                for i in 0..4 {
+                                    if self.slots[i].is_active() {
+                                        active_mask |= 1 << i;
+                                    }
                                 }
                                 
-                                // Update charge current
-                                if let Some(ref task) = slot.current_task {
-                                    let chemistry = task.battery_chemistry;
-                                    let target_voltage = task.target_voltage;
-                                    let cutoff_voltage = task.cutoff_voltage.unwrap_or(chemistry.cutoff_voltage());
-                                    
-                                    let bt_chem = match chemistry {
-                                        BatteryChemistry::LiIon => BtChemistry::LiIon,
-                                        BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
-                                        BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
-                                        BatteryChemistry::NiMH => BtChemistry::NiMH,
-                                        BatteryChemistry::NiCd => BtChemistry::NiCd,
-                                        BatteryChemistry::Eneloop => BtChemistry::Eneloop,
-                                        BatteryChemistry::NiZn => BtChemistry::NiZn,
-                                        BatteryChemistry::RAM => BtChemistry::RAM,
-                                        BatteryChemistry::LTO => BtChemistry::LTO,
-                                        BatteryChemistry::NaIon => BtChemistry::NaIon,
-                                    };
-                                    let config = ChargeConfig {
-                                        channel_bitmask: 1 << slot_idx,
-                                        mode: OperationMode::Charge,
-                                        chemistry: bt_chem,
-                                        charge_current_ma: target_current,
-                                        discharge_current_ma: 0,
-                                        capacity_mah: capacity_mah as u16,
-                                        target_voltage_mv: (target_voltage * 1000.0) as u16,
-                                        cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
-                                        charge_cutoff_current_ma: 100,
-                                        discharge_cutoff_current_ma: 100,
-                                        trickle_charge_ma: if matches!(chemistry, BatteryChemistry::NiCd) { 50 } else { 0 },
-                                        keep_voltage_mv: 0,
-                                        delta_peak_mv: if matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop) { 6 } else { 0 },
-                                        cutoff_timer_min: 0,
-                                        max_time_min: 300,
-                                        cycle_direction: 0x00,
-                                        charge_resting_min: 10,
-                                        discharge_resting_min: 10,
-                                        cycle_count: 1,
-                                    };
-                                    
-                                    if let Some(ref mut device) = self.connected_device {
-                                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                                            let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
-                                            
-                                            match self.rt.block_on(proto.send_command(&cmd)) {
-                                                Ok(_) => {
-                                                    // Re-send start command so updated config takes effect
-                                                    let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
-                                                        mc5000_protocol::StartStopAction::ChannelMask(1 << slot_idx)
-                                                    );
-                                                    let _ = self.rt.block_on(proto.send_command(&start_cmd));
-                                                    
-                                                    if verbose {
-                                                        println!("[AUTO-CHARGE] Slot {}: Updated to {}mA based on {}mΩ resistance",
-                                                            slot_idx + 1, target_current, status.resistance_milliohm);
-                                                    }
-                                                    
-                                                    // Update task current
+                                if let Some(ref mut device) = self.connected_device {
+                                    if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                                        let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
+                                        
+                                        match self.rt.block_on(proto.send_command(&cmd)) {
+                                            Ok(_) => {
+                                                let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
+                                                    mc5000_protocol::StartStopAction::ChannelMask(active_mask)
+                                                );
+                                                let _ = self.rt.block_on(proto.send_command(&start_cmd));
+                                                
+                                                if verbose {
+                                                    println!("[AUTO-CHARGE] Slot {}: Updated to {}mA based on {}mΩ resistance",
+                                                        slot_idx + 1, target_current, status.resistance_milliohm);
+                                                }
+                                                
+                                                // Update task current
+                                                if let Some(slot) = self.slots.get_mut(slot_idx) {
                                                     if let Some(ref mut task) = slot.current_task {
                                                         task.charge_current_ma = target_current;
                                                         task.target_current = target_current as f32 / 1000.0;
                                                     }
-                                                    
-                                                    // Remove from pending list
-                                                    self.auto_charge_pending.retain(|&id| id != slot_id);
                                                 }
-                                                Err(e) => {
-                                                    if verbose {
-                                                        println!("[AUTO-CHARGE] ✗ Slot {}: Failed to update current: {}",
-                                                            slot_idx + 1, e);
-                                                    }
+                                                
+                                                // Remove from pending list
+                                                self.auto_charge_pending.retain(|&id| id != slot_id);
+                                            }
+                                            Err(e) => {
+                                                if verbose {
+                                                    println!("[AUTO-CHARGE] ✗ Slot {}: Failed to update current: {}",
+                                                        slot_idx + 1, e);
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+                        } else if self.auto_charge_pending.contains(&slot_id) && !slot_is_active && elapsed_enough {
+                            // Device didn't start charging — remove from pending
+                            if verbose {
+                                println!("[AUTO-CHARGE] Slot {}: Device did not start, removing from pending", slot_idx + 1);
+                            }
+                            self.auto_charge_pending.retain(|&id| id != slot_id);
                         }
                         
                         // Force UI update
@@ -887,6 +923,7 @@ impl ChargerApp {
             AppMessage::ConfigChemistryChanged(chemistry) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.update_chemistry(chemistry);
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -894,6 +931,7 @@ impl ChargerApp {
             AppMessage::ConfigModeChanged(mode) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.update_mode(mode);
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -901,6 +939,7 @@ impl ChargerApp {
             AppMessage::ConfigCapacityChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.capacity_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -908,6 +947,7 @@ impl ChargerApp {
             AppMessage::ConfigChargeCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_current_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -915,6 +955,7 @@ impl ChargerApp {
             AppMessage::ConfigDischargeCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_current_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -922,6 +963,7 @@ impl ChargerApp {
             AppMessage::ConfigTargetVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.target_voltage_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -929,6 +971,7 @@ impl ChargerApp {
             AppMessage::ConfigCutoffVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cutoff_voltage_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -936,6 +979,7 @@ impl ChargerApp {
             AppMessage::ConfigStorageVoltageChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.storage_voltage_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -943,6 +987,7 @@ impl ChargerApp {
             AppMessage::ConfigDeltaPeakChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.delta_peak_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -950,6 +995,7 @@ impl ChargerApp {
             AppMessage::ConfigTrickleChargeChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.trickle_charge_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -957,6 +1003,7 @@ impl ChargerApp {
             AppMessage::ConfigCutoffTimerChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cutoff_timer_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -964,6 +1011,7 @@ impl ChargerApp {
             AppMessage::ConfigChargeCutoffCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_cutoff_current_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -971,6 +1019,7 @@ impl ChargerApp {
             AppMessage::ConfigDischargeCutoffCurrentChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_cutoff_current_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -978,6 +1027,7 @@ impl ChargerApp {
             AppMessage::ConfigChargeRestingChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.charge_resting_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -985,6 +1035,7 @@ impl ChargerApp {
             AppMessage::ConfigDischargeRestingChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.discharge_resting_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -992,6 +1043,7 @@ impl ChargerApp {
             AppMessage::ConfigCycleCountChanged(value) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.cycle_count_input = value;
+                    state.config_modified = true;
                 }
                 Task::none()
             }
@@ -1009,6 +1061,152 @@ impl ChargerApp {
             AppMessage::ConfigDialogDefault => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.reset_to_defaults();
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigProfileNameChanged(name) => {
+                if let Some(state) = &mut self.config_dialog_state {
+                    state.profile_name_input = name;
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigSaveProfile => {
+                if let Some(state) = &self.config_dialog_state {
+                    let name = if state.profile_name_input.trim().is_empty() {
+                        crate::profiles::Profile::generate_name(
+                            state.chemistry,
+                            state.mode,
+                            &state.get_config(),
+                        )
+                    } else {
+                        state.profile_name_input.clone()
+                    };
+                    let profile = crate::profiles::Profile {
+                        name,
+                        chemistry: state.chemistry,
+                        mode: state.mode,
+                        config: state.get_config(),
+                    };
+                    self.profile_store.add_profile(profile);
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigDeleteProfile => {
+                if let Some(state) = &self.config_dialog_state {
+                    if let Some(idx) = state.selected_profile {
+                        // Store for undo
+                        if let Some(profile) = self.profile_store.profiles.get(idx) {
+                            if let Some(s) = &mut self.config_dialog_state {
+                                s.deleted_profile = Some(profile.clone());
+                            }
+                        }
+                        self.profile_store.delete_profile(idx);
+                        if let Some(s) = &mut self.config_dialog_state {
+                            s.selected_profile = None;
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigUndoDelete => {
+                if let Some(state) = &mut self.config_dialog_state {
+                    if let Some(profile) = state.deleted_profile.take() {
+                        self.profile_store.add_profile(profile);
+                    }
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigUpdateProfile => {
+                if let Some(state) = &self.config_dialog_state {
+                    if let Some(idx) = state.selected_profile {
+                        let config = state.get_config();
+                        let name = if state.profile_name_input.trim().is_empty() {
+                            crate::profiles::Profile::generate_name(state.chemistry, state.mode, &config)
+                        } else {
+                            state.profile_name_input.trim().to_string()
+                        };
+                        if let Some(profile) = self.profile_store.profiles.get_mut(idx) {
+                            profile.name = name;
+                            profile.chemistry = state.chemistry;
+                            profile.mode = state.mode;
+                            profile.config = config;
+                        }
+                        let _ = self.profile_store.save();
+                        if let Some(s) = &mut self.config_dialog_state {
+                            s.config_modified = false;
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigSelectProfile(idx) => {
+                if let Some(state) = &mut self.config_dialog_state {
+                    state.selected_profile = Some(idx);
+                    // Apply profile to dialog
+                    if let Some(profile) = self.profile_store.profiles.get(idx) {
+                        state.apply_profile(profile);
+                        state.config_modified = false;
+                    }
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigExportProfiles => {
+                Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Export Profiles")
+                            .set_file_name("mc5000_profiles.json")
+                            .add_filter("JSON", &["json"])
+                            .save_file()
+                            .await
+                            .map(|handle| handle.path().to_path_buf())
+                    },
+                    AppMessage::ConfigProfilesExported,
+                )
+            }
+
+            AppMessage::ConfigImportProfiles => {
+                Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Import Profiles")
+                            .add_filter("JSON", &["json"])
+                            .pick_file()
+                            .await
+                            .map(|handle| handle.path().to_path_buf())
+                    },
+                    AppMessage::ConfigProfilesImported,
+                )
+            }
+
+            AppMessage::ConfigProfilesExported(path) => {
+                if let Some(path) = path {
+                    if let Err(e) = self.profile_store.export_to_file(&path) {
+                        log::error!("Failed to export profiles: {}", e);
+                    }
+                }
+                Task::none()
+            }
+
+            AppMessage::ConfigProfilesImported(path) => {
+                if let Some(path) = path {
+                    match crate::profiles::ProfileStore::import_from_file(&path) {
+                        Ok(profiles) => {
+                            for p in profiles {
+                                self.profile_store.add_profile(p);
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to import profiles: {}", e);
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -1104,12 +1302,19 @@ impl ChargerApp {
                                 }
                             }
                             
-                            // Start with channel mask for this slot only
+                            // Start with combined bitmask: this slot + all already-active slots
+                            // Protocol requires: start command sets the COMPLETE active slot set
+                            let mut active_mask: u8 = 1 << slot_id.0;
+                            for (i, s) in self.slots.iter().enumerate() {
+                                if i != slot_id.0 && s.is_active() {
+                                    active_mask |= 1 << i;
+                                }
+                            }
                             let start_cmd = MC5000Protocol::build_start_stop_command(
-                                StartStopAction::ChannelMask(1 << slot_id.0)
+                                StartStopAction::ChannelMask(active_mask)
                             );
                             if verbose {
-                                println!("[GUI VERBOSE] Sending start command (mask 0x{:02X})", 1u8 << slot_id.0);
+                                println!("[GUI VERBOSE] Sending start command (mask 0x{:02X})", active_mask);
                             }
                             
                             match self.rt.block_on(proto.send_command(&start_cmd)) {
@@ -1156,6 +1361,8 @@ impl ChargerApp {
                     }
                 }
 
+                // Phase 1: Send config for each idle slot with a battery
+                let mut start_mask: u8 = 0;
                 for slot in &mut self.slots {
                     if slot.is_idle() && slot.current_voltage > 0.1 {
                         let slot_id = slot.id;
@@ -1216,20 +1423,11 @@ impl ChargerApp {
                                 match self.rt.block_on(proto.send_command(&cmd)) {
                                     Ok(_) => {
                                         if verbose {
-                                            println!("[SIMPLE-AUTO] Slot {}: Config sent, starting charge at {}mA", 
+                                            println!("[SIMPLE-AUTO] Slot {}: Config sent ({}mA)", 
                                                 slot_id.0 + 1, charge_current_ma);
                                         }
                                         
-                                        let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
-                                            mc5000_protocol::StartStopAction::ChannelMask(1 << slot_id.0)
-                                        );
-                                        
-                                        if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
-                                            if verbose {
-                                                println!("[SIMPLE-AUTO] ✗ Slot {}: Failed to start: {}", slot_id.0 + 1, e);
-                                            }
-                                            continue;
-                                        }
+                                        start_mask |= 1 << slot_id.0;
                                         
                                         let task = TaskConfig {
                                             task_type: TaskType::Charge,
@@ -1244,11 +1442,10 @@ impl ChargerApp {
                                             discharge_current_ma: 0,
                                         };
                                         
+                                        slot.current_task = Some(task.clone());
+                                        slot.start_time = Some(Instant::now());
+                                        slot.state = SlotState::Charging;
                                         self.slot_configs[slot_id.0] = Some(task);
-                                        
-                                        if verbose {
-                                            println!("[SIMPLE-AUTO] ✓ Slot {}: Charging at {}mA", slot_id.0 + 1, charge_current_ma);
-                                        }
                                     }
                                     Err(e) => {
                                         if verbose {
@@ -1256,6 +1453,36 @@ impl ChargerApp {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                
+                // Phase 2: Send ONE combined start command for all configured slots + already active
+                if start_mask != 0 {
+                    // Include already-active slots in the mask
+                    for (i, s) in self.slots.iter().enumerate() {
+                        if s.is_active() && (start_mask & (1 << i)) == 0 {
+                            start_mask |= 1 << i;
+                        }
+                    }
+                    
+                    if let Some(ref mut device) = self.connected_device {
+                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                            let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
+                                mc5000_protocol::StartStopAction::ChannelMask(start_mask)
+                            );
+                            
+                            if verbose {
+                                println!("[SIMPLE-AUTO] Sending combined start command (mask 0x{:02X})", start_mask);
+                            }
+                            
+                            if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
+                                if verbose {
+                                    println!("[SIMPLE-AUTO] ✗ Failed to send start: {}", e);
+                                }
+                            } else if verbose {
+                                println!("[SIMPLE-AUTO] ✓ All slots started");
                             }
                         }
                     }
@@ -1280,7 +1507,8 @@ impl ChargerApp {
                     }
                 }
 
-                // Find all idle slots with batteries present
+                // Phase 1: Send config for each idle slot with a battery
+                let mut start_mask: u8 = 0;
                 for slot in &mut self.slots {
                     if slot.is_idle() && slot.current_voltage > 0.1 {
                         let slot_id = slot.id;
@@ -1336,7 +1564,6 @@ impl ChargerApp {
                             cycle_count: 1,
                         };
                         
-                        // Send charge command with minimal current
                         if let Some(ref mut device) = self.connected_device {
                             if let Some(proto) = device.bluetooth_protocol.as_mut() {
                                 let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
@@ -1344,26 +1571,11 @@ impl ChargerApp {
                                 match self.rt.block_on(proto.send_command(&cmd)) {
                                     Ok(_) => {
                                         if verbose {
-                                            println!("[AUTO-CHARGE] Slot {}: Config sent, starting charge at {}mA", 
+                                            println!("[AUTO-CHARGE] Slot {}: Config sent ({}mA)", 
                                                 slot_id.0 + 1, initial_current_ma);
                                         }
                                         
-                                        // Send start command
-                                        let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
-                                            mc5000_protocol::StartStopAction::ChannelMask(1 << slot_id.0)
-                                        );
-                                        
-                                        if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
-                                            if verbose {
-                                                println!("[AUTO-CHARGE] ✗ Slot {}: Failed to start: {}", slot_id.0 + 1, e);
-                                            }
-                                            continue;
-                                        }
-                                        
-                                        if verbose {
-                                            println!("[AUTO-CHARGE] Slot {}: Started initial charge at {}mA", 
-                                                slot_id.0 + 1, initial_current_ma);
-                                        }
+                                        start_mask |= 1 << slot_id.0;
                                         
                                         // Create task config
                                         let task = TaskConfig {
@@ -1394,6 +1606,36 @@ impl ChargerApp {
                                         log::error!("Auto-charge failed for slot {}: {}", slot_id.0 + 1, e);
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                
+                // Phase 2: Send ONE combined start command for all configured slots + already active
+                if start_mask != 0 {
+                    // Include already-active slots in the mask
+                    for (i, s) in self.slots.iter().enumerate() {
+                        if s.is_active() && (start_mask & (1 << i)) == 0 {
+                            start_mask |= 1 << i;
+                        }
+                    }
+                    
+                    if let Some(ref mut device) = self.connected_device {
+                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                            let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
+                                mc5000_protocol::StartStopAction::ChannelMask(start_mask)
+                            );
+                            
+                            if verbose {
+                                println!("[AUTO-CHARGE] Sending combined start command (mask 0x{:02X})", start_mask);
+                            }
+                            
+                            if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
+                                if verbose {
+                                    println!("[AUTO-CHARGE] ✗ Failed to send start: {}", e);
+                                }
+                            } else if verbose {
+                                println!("[AUTO-CHARGE] ✓ All slots started");
                             }
                         }
                     }
@@ -1511,6 +1753,13 @@ impl ChargerApp {
                 Task::none()
             }
             
+            AppMessage::SettingsChangeLanguage(lang) => {
+                self.settings.language = lang.clone();
+                crate::i18n::set_language(&lang);
+                let _ = crate::settings::save(&self.settings);
+                Task::none()
+            }
+            
             AppMessage::SettingsToggleSaveDevice => {
                 self.settings.save_last_device = !self.settings.save_last_device;
                 if !self.settings.save_last_device {
@@ -1552,6 +1801,7 @@ impl ChargerApp {
             self.selected_slot,
             &self.config_dialog_state,
             self.show_detailed_stats,
+            &self.profile_store,
         )
     }
 
@@ -1587,7 +1837,10 @@ impl ChargerApp {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        match self.settings.theme {
+            crate::settings::AppTheme::Light => Theme::Light,
+            crate::settings::AppTheme::Dark => Theme::Dark,
+        }
     }
 }
 

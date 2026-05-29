@@ -31,6 +31,8 @@ env_logger = "0.11"
 # Settings persistence
 confy = "0.6"
 open = "5"
+rust-i18n = "3"
+sys-locale = "0.3"
 
 # Data export
 csv = "1.3"

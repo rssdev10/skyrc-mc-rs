@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use crate::slot::BatteryChemistry;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ChargeMode {
     Charge,
     Storage,
@@ -46,7 +47,7 @@ impl ChargeMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChargeConfig {
     // Common parameters
     pub capacity_mah: u16,

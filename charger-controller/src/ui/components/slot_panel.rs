@@ -4,6 +4,7 @@ use iced::{
 };
 
 use crate::app::AppMessage;
+use crate::i18n::t;
 use crate::slot::{Slot, SlotState, TaskConfig, TaskType, BatteryChemistry};
 
 pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize) -> Element<'a, AppMessage> {
@@ -12,7 +13,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     }
 
     let slot_header = row![
-        text(format!("Slot {}", slot.id.0 + 1)).size(16),
+        text(format!("{} {}", t!("label.slot"), slot.id.0 + 1)).size(16),
         iced::widget::space::horizontal(),
         status_badge(&slot.state),
     ]
@@ -21,13 +22,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     let measurements = column![
         row![
             column![
-                text("Voltage").size(12),
+                text(t!("label.voltage").to_string()).size(12),
                 text(format!("{:.3}V", slot.current_voltage)).size(14),
             ]
             .width(Length::FillPortion(1))
             .align_x(iced::Center),
             column![
-                text("Current").size(12),
+                text(t!("label.current").to_string()).size(12),
                 text(format!("{}mA", slot.current_current as u16)).size(14),
             ]
             .width(Length::FillPortion(1))
@@ -36,13 +37,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         .spacing(10),
         row![
             column![
-                text("Power").size(12),
+                text(t!("label.power").to_string()).size(12),
                 text(format!("{:.1}W", slot.power_w())).size(14),
             ]
             .width(Length::FillPortion(1))
             .align_x(iced::Center),
             column![
-                text("Capacity").size(12),
+                text(t!("label.capacity").to_string()).size(12),
                 text(format!("{}mAh", slot.capacity_mah)).size(14),
             ]
             .width(Length::FillPortion(1))
@@ -51,13 +52,13 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         .spacing(10),
         row![
             column![
-                text("Resistance").size(12),
+                text(t!("label.resistance").to_string()).size(12),
                 text(format!("{}mΩ", slot.resistance_milliohm)).size(14),
             ]
             .width(Length::FillPortion(1))
             .align_x(iced::Center),
             column![
-                text("Time").size(12),
+                text(t!("label.time").to_string()).size(12),
                 text(format!("{:02}:{:02}", slot.elapsed_seconds / 60, slot.elapsed_seconds % 60)).size(14),
             ]
             .width(Length::FillPortion(1))
@@ -72,7 +73,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         let progress_value = slot.get_progress_percentage() / 100.0;
         let progress_section = column![
             row![
-                text("Progress").size(12),
+                text(t!("label.progress").to_string()).size(12),
                 iced::widget::space::horizontal(),
                 text(format!("{:.1}%", slot.get_progress_percentage())).size(12),
             ],
@@ -82,7 +83,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         .spacing(2)
         .width(Length::Fill);
 
-        let stop_button = button(text("Stop").size(13))
+        let stop_button = button(text(t!("btn.stop").to_string()).size(14))
             .on_press(AppMessage::StopTask(slot.id))
             .style(button::danger)
             .padding([8, 12]);
@@ -96,7 +97,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         .into()
     } else if slot.state == SlotState::Idle {
         // Centered configure button with 20px padding on each side
-        let mut btn = button(text("Configure & Start").size(13))
+        let mut btn = button(text(t!("btn.configure_start").to_string()).size(14))
             .style(button::primary)
             .padding([8, 12]);
 
@@ -112,7 +113,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
             .into()
     } else {
         // Completed or error - reset button centered
-        let btn = button(text("Reset").size(13))
+        let btn = button(text(t!("btn.reset").to_string()).size(14))
             .on_press(AppMessage::StopTask(slot.id))
             .style(button::secondary)
             .padding([8, 12]);
@@ -146,17 +147,23 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     let border_width = if is_selected { 3.0 } else { 1.0 };
     let border_color = if is_selected { slot_color } else { iced::Color::from_rgb(0.3, 0.3, 0.3) };
 
-    // Highlight slots with battery inserted (voltage > 0) with a lighter background
+    // Highlight slots with battery inserted (voltage > 0)
     let has_battery = slot.current_voltage > 0.0;
-    let background_color = if has_battery {
-        Some(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06))
-    } else {
-        None
-    };
 
     mouse_area(
         container(content)
-            .style(move |_theme: &iced::Theme| {
+            .style(move |theme: &iced::Theme| {
+                let bg = theme.palette().background;
+                let is_dark = (bg.r + bg.g + bg.b) / 3.0 < 0.5;
+                let background_color = if has_battery {
+                    if is_dark {
+                        Some(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08))
+                    } else {
+                        Some(iced::Color::from_rgba(0.0, 0.6, 0.0, 0.08))
+                    }
+                } else {
+                    None
+                };
                 container::Style {
                     border: Border {
                         color: border_color,
@@ -175,12 +182,12 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
 
 fn status_badge(state: &SlotState) -> Element<'static, AppMessage> {
     let (status_text, color) = match state {
-        SlotState::Idle => ("Idle", iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        SlotState::Charging => ("⚡ Charging", iced::Color::from_rgb(0.2, 0.8, 0.2)),
-        SlotState::Discharging => ("↓ Discharging", iced::Color::from_rgb(0.8, 0.6, 0.2)),
-        SlotState::Completed => ("✓ Done", iced::Color::from_rgb(0.2, 0.6, 1.0)),
-        SlotState::Error(_) => ("⚠ Error", iced::Color::from_rgb(0.8, 0.2, 0.2)),
-        SlotState::Paused => ("⏸ Paused", iced::Color::from_rgb(0.8, 0.8, 0.2)),
+        SlotState::Idle => (t!("label.idle").to_string(), iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        SlotState::Charging => (format!("⚡ {}", t!("label.charging")), iced::Color::from_rgb(0.2, 0.8, 0.2)),
+        SlotState::Discharging => (format!("↓ {}", t!("label.discharging")), iced::Color::from_rgb(0.8, 0.6, 0.2)),
+        SlotState::Completed => (format!("✓ {}", t!("label.done")), iced::Color::from_rgb(0.2, 0.6, 1.0)),
+        SlotState::Error(_) => (format!("⚠ {}", t!("label.error")), iced::Color::from_rgb(0.8, 0.2, 0.2)),
+        SlotState::Paused => (format!("⏸ {}", t!("label.paused")), iced::Color::from_rgb(0.8, 0.8, 0.2)),
     };
     text(status_text).size(14).color(color).into()
 }
@@ -190,7 +197,7 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     let config = config.unwrap_or(&default_config);
 
     let chemistry_picker = column![
-        text("Battery Chemistry:"),
+        text(format!("{}:", t!("config.chemistry"))),
         pick_list(
             BatteryChemistry::all(),
             Some(config.battery_chemistry),
@@ -207,7 +214,7 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     ];
 
     let task_type_picker = column![
-        text("Operation Mode:"),
+        text(format!("{}:", t!("config.operation_mode"))),
         pick_list(
             task_types,
             Some(config.task_type.clone()),
@@ -217,7 +224,7 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     .spacing(5);
 
     let capacity_input = column![
-        text("Capacity (mAh):"),
+        text(format!("{} (mAh):", t!("config.capacity"))),
         text_input(
             &format!("{}", config.capacity_limit.unwrap_or(3000)),
             &format!("{}", config.capacity_limit.unwrap_or(3000))
@@ -233,7 +240,7 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     .spacing(5);
 
     let current_input = column![
-        text("Charge Current (mA):"),
+        text(format!("{} (mA):", t!("config.charge_current"))),
         text_input(
             &format!("{}", config.charge_current_ma),
             &format!("{}", config.charge_current_ma)
@@ -255,17 +262,17 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
     .spacing(3);
 
     let buttons = row![
-        button("Cancel")
+        button(text(t!("btn.cancel").to_string()))
             .on_press(AppMessage::CancelSlotConfig(slot.id))
             .style(button::secondary),
-        button("Start")
+        button(text(t!("btn.start").to_string()))
             .on_press(AppMessage::ApplySlotConfig(slot.id))
             .style(button::primary),
     ]
     .spacing(10);
 
     let content = column![
-        text(format!("Configure Slot {}", slot.id.0 + 1)).size(16),
+        text(format!("{} {}", t!("config.configure_slot"), slot.id.0 + 1)).size(16),
         chemistry_picker,
         task_type_picker,
         capacity_input,

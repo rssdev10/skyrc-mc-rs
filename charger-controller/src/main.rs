@@ -3,6 +3,8 @@ use iced::window;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod app;
 mod slot;
 mod ui;
@@ -10,6 +12,8 @@ mod data;
 mod export;
 mod config_dialog;
 mod settings;
+mod i18n;
+mod profiles;
 
 use app::ChargerApp;
 

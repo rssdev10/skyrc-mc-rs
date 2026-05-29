@@ -44,11 +44,15 @@ impl<'a> canvas::Program<AppMessage> for GraphCanvas<'a> {
         &self,
         _state: &Self::State,
         renderer: &iced::Renderer,
-        _theme: &iced::Theme,
+        theme: &iced::Theme,
         bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
+        
+        // Detect if theme is dark or light
+        let bg = theme.palette().background;
+        let is_dark = (bg.r + bg.g + bg.b) / 3.0 < 0.5;
         
         // Define margins for axes
         let margin_left = 60.0;
@@ -59,11 +63,16 @@ impl<'a> canvas::Program<AppMessage> for GraphCanvas<'a> {
         let _graph_width = bounds.width - margin_left - margin_right;
         let _graph_height = bounds.height - margin_top - margin_bottom;
         
-        // Draw background
+        // Draw background based on theme
+        let bg_color = if is_dark {
+            Color::from_rgb(0.1, 0.1, 0.1)
+        } else {
+            Color::from_rgb(0.97, 0.97, 0.97)
+        };
         frame.fill_rectangle(
             Point::ORIGIN,
             bounds.size(),
-            Color::from_rgb(0.1, 0.1, 0.1),
+            bg_color,
         );
 
         // Calculate global min/max across all slots for auto-scaling
@@ -80,6 +89,7 @@ impl<'a> canvas::Program<AppMessage> for GraphCanvas<'a> {
             global_min_voltage,
             global_max_voltage,
             global_max_current,
+            is_dark,
         );
 
         // Draw data only for selected slot (or all if none selected)
@@ -121,7 +131,7 @@ impl<'a> canvas::Program<AppMessage> for GraphCanvas<'a> {
         }
 
         // Draw legend showing selected slot
-        self.draw_legend(&mut frame, bounds.size());
+        self.draw_legend(&mut frame, bounds.size(), is_dark);
 
         vec![frame.into_geometry()]
     }
@@ -184,15 +194,28 @@ impl<'a> GraphCanvas<'a> {
         min_voltage: f32,
         max_voltage: f32,
         max_current: f32,
+        is_dark: bool,
     ) {
         use canvas::Path;
         
         let graph_width = size.width - margin_left - margin_right;
         let graph_height = size.height - margin_top - margin_bottom;
         
-        let grid_color = Color::from_rgb(0.3, 0.3, 0.3);
-        let axis_color = Color::from_rgb(0.6, 0.6, 0.6);
-        let text_color = Color::from_rgb(0.8, 0.8, 0.8);
+        let grid_color = if is_dark {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.10)
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.15)
+        };
+        let axis_color = if is_dark {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.55)
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+        };
+        let text_color = if is_dark {
+            Color::from_rgb(0.8, 0.8, 0.8)
+        } else {
+            Color::from_rgb(0.2, 0.2, 0.2)
+        };
         
         // Draw vertical grid lines (time intervals)
         for i in 0..=10 {
@@ -358,7 +381,7 @@ impl<'a> GraphCanvas<'a> {
         }
     }
 
-    fn draw_legend(&self, frame: &mut canvas::Frame, size: Size) {
+    fn draw_legend(&self, frame: &mut canvas::Frame, size: Size, _is_dark: bool) {
         // Show legend for selected slot only
         if let Some(selected_idx) = self.selected_slot {
             let legend_y = size.height - 30.0;
