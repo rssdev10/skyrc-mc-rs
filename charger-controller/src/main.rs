@@ -9,6 +9,7 @@ mod ui;
 mod data;
 mod export;
 mod config_dialog;
+mod settings;
 
 use app::ChargerApp;
 
@@ -159,7 +160,7 @@ fn run_gui(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     let icon = load_icon();
     
     iced::application(ChargerApp::new, ChargerApp::update, ChargerApp::view)
-        .title("MC5000 Charger Controller")
+        .title(ChargerApp::title)
         .subscription(ChargerApp::subscription)
         .theme(ChargerApp::theme)
         .window(window::Settings {

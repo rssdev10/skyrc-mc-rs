@@ -22,6 +22,10 @@ pub enum AppMessage {
     NotificationReceived(Vec<u8>),
     DeviceSelected(String),
     BluetoothScanComplete(Result<Vec<String>, String>),
+    /// Result of a quick targeted scan for a previously known device.
+    /// `Ok(Some(display_name))` → found, ready to connect.
+    /// `Ok(None)` → not found, fall back to full scan.
+    QuickScanResult(Result<Option<String>, String>),
     ConnectDevice,
     DisconnectDevice,
     RefreshDevices,
@@ -69,6 +73,12 @@ pub enum AppMessage {
     ExportAllSamples,     // Export all individual samples CSV
     FileSelectedTimeAligned(Option<std::path::PathBuf>),
     FileSelectedAllSamples(Option<std::path::PathBuf>),
+    // Settings dialog messages
+    SettingsOpen,
+    SettingsClose,
+    SettingsChangeTheme(crate::settings::AppTheme),
+    SettingsToggleSaveDevice,
+    SettingsOpenRepo,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +108,8 @@ pub struct ChargerApp {
     saved_slot_configs: [Option<crate::ui::components::config_dialog::ConfigDialogState>; 4],  // Persist config per slot
     auto_charge_pending: Vec<SlotId>,  // Slots waiting for resistance measurement in auto-charge mode
     show_detailed_stats: bool,  // Toggle for detailed per-slot sample stream
+    settings: crate::settings::Settings,
+    show_settings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +215,7 @@ impl ChargerApp {
         }
         
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let settings = crate::settings::load();
         
         if verbose {
             println!("[APP VERBOSE] Creating device manager and initializing slots...");
@@ -233,6 +246,8 @@ impl ChargerApp {
             saved_slot_configs: [None, None, None, None],
             auto_charge_pending: Vec::new(),
             show_detailed_stats: false,  // Default: hide detailed per-slot stream
+            settings,
+            show_settings: false,
         };
 
         if verbose {
@@ -240,27 +255,64 @@ impl ChargerApp {
             println!("[APP VERBOSE] ChargerApp initialization complete\n");
         }
 
-        // Start async Bluetooth scan
-        let scan_command = Task::perform(
+        // If we have a saved device and "save_last_device" is on, do a quick targeted
+        // scan instead of a full 5-second blind scan.
+        let startup_task = if app.settings.save_last_device {
+            if let Some(ref saved) = app.settings.last_device_id {
+                // Extract the peripheral ID from the stored display name
+                // Format: "MC5000 BT: <name> (ID:<peripheral_id>)"
+                let peripheral_id: Option<String> = saved.find("ID:").map(|start| {
+                    let id_start = start + 3;
+                    saved[id_start..]
+                        .find(')')
+                        .map(|end| saved[id_start..id_start + end].to_string())
+                        .unwrap_or_else(|| saved[id_start..].to_string())
+                });
+
+                if let Some(pid) = peripheral_id {
+                    if verbose {
+                        println!("[APP VERBOSE] Quick scan for saved peripheral: {}", pid);
+                    }
+                    Task::perform(
+                        async move {
+                            let mut dm = mc5000_protocol::DeviceManager::new();
+                            dm.quick_scan_for_device(&pid, 5).await
+                                .map_err(|e| e.to_string())
+                        },
+                        AppMessage::QuickScanResult,
+                    )
+                } else {
+                    // Saved name has no parseable ID — fall back to full scan
+                    Self::full_scan_task()
+                }
+            } else {
+                Self::full_scan_task()
+            }
+        } else {
+            Self::full_scan_task()
+        };
+
+        (app, startup_task)
+    }
+
+    fn full_scan_task() -> Task<AppMessage> {
+        Task::perform(
             async {
-                let mut device_manager = DeviceManager::new();
+                let mut device_manager = mc5000_protocol::DeviceManager::new();
                 match device_manager.scan_bluetooth_devices().await {
                     Ok(_) => {
                         let devices = device_manager.get_available_devices().to_vec();
                         Ok(devices)
                     }
-                    Err(e) => Err(e.to_string())
+                    Err(e) => Err(e.to_string()),
                 }
             },
-            AppMessage::BluetoothScanComplete
-        );
-
-        (app, scan_command)
+            AppMessage::BluetoothScanComplete,
+        )
     }
 
-    #[allow(dead_code)]
     pub fn title(&self) -> String {
-        "MC5000 Charger Controller".to_string()
+        format!("MC5000 Charger Controller v{}", env!("CARGO_PKG_VERSION"))
     }
 
     pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
@@ -476,6 +528,70 @@ impl ChargerApp {
                 Task::none()
             }
             
+            AppMessage::QuickScanResult(result) => {
+                let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                match result {
+                    Ok(Some(display_name)) => {
+                        // Quick scan succeeded — populate our device manager with the found
+                        // peripheral (it is already in the temporary DeviceManager used in the
+                        // task, but we need it in self.device_manager for connect() to work).
+                        // Re-use the quick scan result: do a short re-scan on self.device_manager.
+                        // Extract peripheral ID from display_name and quick-scan again.
+                        let peripheral_id: Option<String> = display_name.find("ID:").map(|start| {
+                            let id_start = start + 3;
+                            display_name[id_start..]
+                                .find(')')
+                                .map(|end| display_name[id_start..id_start + end].to_string())
+                                .unwrap_or_else(|| display_name[id_start..].to_string())
+                        });
+
+                        if let Some(pid) = peripheral_id {
+                            let _ = self.rt.block_on(self.device_manager.quick_scan_for_device(&pid, 5));
+                        }
+
+                        if verbose {
+                            println!("[APP VERBOSE] Quick scan found device: {}", display_name);
+                        }
+                        self.scanning = false;
+                        self.selected_device = Some(display_name);
+                        self.update(AppMessage::ConnectDevice)
+                    }
+                    Ok(None) => {
+                        // Device not nearby — fall back to a full scan
+                        if verbose {
+                            println!("[APP VERBOSE] Quick scan: device not found, falling back to full scan");
+                        }
+                        // scanning stays true; fire off full scan
+                        Task::perform(
+                            async {
+                                let mut device_manager = mc5000_protocol::DeviceManager::new();
+                                match device_manager.scan_bluetooth_devices().await {
+                                    Ok(_) => Ok(device_manager.get_available_devices().to_vec()),
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            },
+                            AppMessage::BluetoothScanComplete,
+                        )
+                    }
+                    Err(e) => {
+                        if verbose {
+                            println!("[APP VERBOSE] Quick scan error: {}", e);
+                        }
+                        // Also fall back to full scan on error
+                        Task::perform(
+                            async {
+                                let mut device_manager = mc5000_protocol::DeviceManager::new();
+                                match device_manager.scan_bluetooth_devices().await {
+                                    Ok(_) => Ok(device_manager.get_available_devices().to_vec()),
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            },
+                            AppMessage::BluetoothScanComplete,
+                        )
+                    }
+                }
+            }
+
             AppMessage::BluetoothScanComplete(result) => {
                 let verbose = std::env::var("MC5000_VERBOSE").is_ok();
                 self.scanning = false;  // Scan complete, enable UI
@@ -487,16 +603,17 @@ impl ChargerApp {
                             println!("[APP VERBOSE] Found {} devices", devices.len());
                         }
                         
-                        // Re-scan to populate device_manager properly
+                        // Re-scan to populate device_manager with live peripheral handles
                         let _ = self.rt.block_on(self.device_manager.scan_bluetooth_devices());
                         
-                        // Auto-select first MC5000 device
-                        let mc5000_device = self.device_manager.get_available_devices()
+                        // Select the first MC5000 device (no auto-connect on full scan —
+                        // the user explicitly gets to choose or this is the fallback path)
+                        let device_to_select = self.device_manager.get_available_devices()
                             .iter()
                             .find(|d| d.starts_with("MC5000"))
                             .cloned();
                         
-                        if let Some(device) = mc5000_device {
+                        if let Some(device) = device_to_select {
                             if verbose {
                                 println!("[APP VERBOSE] Auto-selecting device: {}", device);
                             }
@@ -520,6 +637,32 @@ impl ChargerApp {
                         println!("[GUI VERBOSE] Attempting to connect to device: {}", device_name);
                     }
                     
+                    // Check if device is still in the available list
+                    let device_available = self.device_manager.get_available_devices()
+                        .iter()
+                        .any(|d| d == device_name);
+                    
+                    if !device_available {
+                        if verbose {
+                            println!("[GUI VERBOSE] Device not in list, re-scanning...");
+                        }
+                        // Device not found — trigger a re-scan which will repopulate the list
+                        self.scanning = true;
+                        return Task::perform(
+                            async {
+                                let mut device_manager = DeviceManager::new();
+                                match device_manager.scan_bluetooth_devices().await {
+                                    Ok(_) => {
+                                        let devices = device_manager.get_available_devices().to_vec();
+                                        Ok(devices)
+                                    }
+                                    Err(e) => Err(e.to_string())
+                                }
+                            },
+                            AppMessage::BluetoothScanComplete,
+                        );
+                    }
+                    
                     self.connection_status = ConnectionStatus::Connecting;
                     let device_name_clone = device_name.clone();
                     
@@ -540,6 +683,11 @@ impl ChargerApp {
                                 println!("[GUI VERBOSE] Device type: {:?}", device.device_type);
                             }
                             self.connection_status = ConnectionStatus::Connected;
+                            // Persist last connected device if enabled
+                            if self.settings.save_last_device {
+                                self.settings.last_device_id = self.selected_device.clone();
+                                let _ = crate::settings::save(&self.settings);
+                            }
                             self.connected_device = Some(device);
                         }
                         Err(e) => {
@@ -1346,6 +1494,36 @@ impl ChargerApp {
                 self.data_logger.clear();
                 Task::none()
             }
+            
+            AppMessage::SettingsOpen => {
+                self.show_settings = true;
+                Task::none()
+            }
+            
+            AppMessage::SettingsClose => {
+                self.show_settings = false;
+                Task::none()
+            }
+            
+            AppMessage::SettingsChangeTheme(theme) => {
+                self.settings.theme = theme;
+                let _ = crate::settings::save(&self.settings);
+                Task::none()
+            }
+            
+            AppMessage::SettingsToggleSaveDevice => {
+                self.settings.save_last_device = !self.settings.save_last_device;
+                if !self.settings.save_last_device {
+                    self.settings.last_device_id = None;
+                }
+                let _ = crate::settings::save(&self.settings);
+                Task::none()
+            }
+            
+            AppMessage::SettingsOpenRepo => {
+                let _ = open::that("https://github.com/rssdev10/skyrc-mc-rs");
+                Task::none()
+            }
         }
     }
 
@@ -1355,6 +1533,10 @@ impl ChargerApp {
             use std::io::Write;
             println!("[GUI VERBOSE] View rendered, update_counter: {}", self.update_counter);
             let _ = std::io::stdout().flush();
+        }
+        
+        if self.show_settings {
+            return crate::ui::components::settings_dialog::view(&self.settings);
         }
         
         ui::main_view(

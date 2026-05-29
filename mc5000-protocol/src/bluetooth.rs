@@ -627,6 +627,55 @@ impl MC5000Protocol {
         Ok(devices)
     }
 
+    /// Quick scan targeting a specific peripheral ID. Returns early as soon as the
+    /// target is seen, so it is much faster than a full scan when the device is nearby.
+    /// Returns `None` when the device was not seen within `timeout_secs`.
+    pub async fn scan_for_device(target_id: &str, timeout_secs: u64) -> Result<Option<DiscoveredBluetoothDevice>, BluetoothError> {
+        let manager = Manager::new().await?;
+        let adapters = manager.adapters().await?;
+
+        if adapters.is_empty() {
+            return Err(BluetoothError::AdapterNotFound);
+        }
+
+        let central = &adapters[0];
+        central.start_scan(ScanFilter::default()).await?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        let poll = Duration::from_millis(500);
+        let mut found = None;
+
+        while std::time::Instant::now() < deadline {
+            time::sleep(poll).await;
+            let peripherals = central.peripherals().await?;
+            for peripheral in &peripherals {
+                if peripheral.id().to_string() == target_id {
+                    if let Ok(Some(properties)) = peripheral.properties().await {
+                        let name = properties.local_name.clone()
+                            .unwrap_or_else(|| "Unknown Device".to_string());
+                        let address = properties.address.to_string();
+                        let is_mc5000 = Self::is_mc5000_device(&name, &properties.address);
+                        found = Some(DiscoveredBluetoothDevice {
+                            id: peripheral.id().to_string(),
+                            name,
+                            address,
+                            rssi: properties.rssi,
+                            is_mc5000,
+                            peripheral: peripheral.clone(),
+                        });
+                    }
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+
+        central.stop_scan().await?;
+        Ok(found)
+    }
+
     /// Check if a device is an MC5000 based on name or advertised services
     fn is_mc5000_device(name: &str, _properties: &btleplug::api::BDAddr) -> bool {
         // Check device name patterns based on actual CSV log findings

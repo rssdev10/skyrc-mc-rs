@@ -122,6 +122,51 @@ impl DeviceManager {
         }
     }
 
+    /// Quick targeted scan for a previously connected device.
+    /// Polls BLE for up to `timeout_secs` seconds, returning early if the
+    /// target peripheral (identified by its `peripheral_id`) is found.
+    /// When found, the device is added to `bluetooth_devices` and the
+    /// formatted display name (`"MC5000 BT: <name> (ID:<id>)"`) is returned.
+    /// Returns `Ok(None)` when the device was not seen — the caller should
+    /// fall back to a full `scan_bluetooth_devices` scan.
+    pub async fn quick_scan_for_device(&mut self, peripheral_id: &str, timeout_secs: u64) -> Result<Option<String>, DeviceError> {
+        let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+        if verbose {
+            println!("[DEVICE VERBOSE] Quick scan for peripheral ID: {}", peripheral_id);
+        }
+
+        match MC5000Protocol::scan_for_device(peripheral_id, timeout_secs).await {
+            Ok(Some(bt_device)) => {
+                if verbose {
+                    println!("[DEVICE VERBOSE] Quick scan found: {} ({})", bt_device.name, bt_device.id);
+                }
+                let display_name = format!("MC5000 BT: {} (ID:{})", bt_device.name, bt_device.id);
+                if !self.available_devices.contains(&display_name) {
+                    self.available_devices.push(display_name.clone());
+                }
+                // Replace or insert in bluetooth_devices so connect() can find the peripheral
+                if let Some(existing) = self.bluetooth_devices.iter_mut().find(|d| d.id == bt_device.id) {
+                    *existing = bt_device;
+                } else {
+                    self.bluetooth_devices.push(bt_device);
+                }
+                Ok(Some(display_name))
+            }
+            Ok(None) => {
+                if verbose {
+                    println!("[DEVICE VERBOSE] Quick scan: device not found within timeout");
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                if verbose {
+                    println!("[DEVICE VERBOSE] Quick scan failed: {}", e);
+                }
+                Err(DeviceError::from(e))
+            }
+        }
+    }
+
     pub async fn connect(&mut self, device_name: String) -> Result<Device, DeviceError> {
         // Check if this is a Bluetooth device
         if device_name.starts_with("MC5000 BT:") {

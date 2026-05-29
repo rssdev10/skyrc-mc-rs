@@ -91,11 +91,16 @@ pub fn view<'a>(
         .into()
     };
 
+    let settings_button = button(text("⚙").size(16))
+        .on_press(AppMessage::SettingsOpen)
+        .padding([4, 8]);
+
     container(
         row![
             device_controls,
             iced::widget::space::horizontal(),
             status_text,
+            settings_button,
         ]
         .spacing(10)
         .align_y(iced::Center)

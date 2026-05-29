@@ -146,6 +146,14 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     let border_width = if is_selected { 3.0 } else { 1.0 };
     let border_color = if is_selected { slot_color } else { iced::Color::from_rgb(0.3, 0.3, 0.3) };
 
+    // Highlight slots with battery inserted (voltage > 0) with a lighter background
+    let has_battery = slot.current_voltage > 0.0;
+    let background_color = if has_battery {
+        Some(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06))
+    } else {
+        None
+    };
+
     mouse_area(
         container(content)
             .style(move |_theme: &iced::Theme| {
@@ -155,6 +163,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
                         width: border_width,
                         radius: 5.0.into(),
                     },
+                    background: background_color.map(iced::Background::Color),
                     ..Default::default()
                 }
             })
