@@ -23,7 +23,7 @@ tokio-stream = { workspace = true }
 clap = { workspace = true }
 
 # GUI dependencies
-iced = { version = "0.14", features = ["tokio", "canvas"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "advanced"] }
 rfd = "0.14"
 image = "0.25"
 env_logger = "0.11"

@@ -126,6 +126,11 @@ pub struct ChargerApp {
     settings: crate::settings::Settings,
     show_settings: bool,
     profile_store: crate::profiles::ProfileStore,
+    /// Timestamp when buttons should be re-enabled (for command-in-flight cooldown)
+    buttons_locked_until: Option<Instant>,
+    /// Per-slot lock: (timestamp, slot-state at button-press).
+    /// Cleared when a notification brings a *different* state, or after 10s fallback.
+    slot_command_pending: [Option<(Instant, SlotState)>; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,6 +312,8 @@ impl ChargerApp {
             show_settings: false,
             profile_store,
             slot_config_store,
+            buttons_locked_until: None,
+            slot_command_pending: [None, None, None, None],
         };
 
         if verbose {
@@ -400,10 +407,14 @@ impl ChargerApp {
                         let _ = std::io::stdout().flush();
                     }
                     
+                    // (command-pending flag is cleared below, after we know the new state)
+
                     // Parse status using the MC5000SlotStatus parser
                     if let Ok(status) = mc5000_protocol::MC5000SlotStatus::parse_from_response(&data) {
                         let voltage = status.voltage();
-                        let current = status.current();
+                        // current_current is stored and displayed in mA throughout the codebase.
+                        // status.current() returns amps (divides by 1000) which is wrong here.
+                        let current = status.current_ma as f32;
                         
                         if verbose {
                             use std::io::Write;
@@ -421,10 +432,18 @@ impl ChargerApp {
                                 status.resistance_milliohm,
                                 status.elapsed_seconds
                             );
-                            let new_state = map_bt_state(&status.state);
-                            // Don't downgrade from Charging to Idle within 10s of starting.
-                            // The MC5000 reports 0x00 (Idle) during NiMH charge startup
-                            // until current actually starts flowing.
+                            // The parser now returns Charging for any active slot (current>0).
+                            // Restore Discharging when the task type calls for it.
+                            let mut new_state = map_bt_state(&status.state);
+                            if new_state == SlotState::Charging {
+                                if let Some(ref task) = slot.current_task {
+                                    if task.task_type == TaskType::Discharge {
+                                        new_state = SlotState::Discharging;
+                                    }
+                                }
+                            }
+                            // Don't downgrade from active to Idle within 10s of starting
+                            // (device may report 0 current briefly during ramp-up).
                             let should_protect = slot.is_active()
                                 && new_state == SlotState::Idle
                                 && slot.start_time.map(|t| t.elapsed().as_secs() < 10).unwrap_or(false);
@@ -432,7 +451,15 @@ impl ChargerApp {
                                 slot.set_state(new_state);
                             }
                         }
-                        
+
+                        // Unlock button for this slot when its state changed from what was
+                        // recorded at button-press time (10s fallback is handled in the view).
+                        if let Some((_, ref prev_state)) = self.slot_command_pending[slot_idx].clone() {
+                            if self.slots[slot_idx].state != *prev_state {
+                                self.slot_command_pending[slot_idx] = None;
+                            }
+                        }
+
                         // Check if this slot is in auto-charge mode and has valid resistance
                         let slot_id = SlotId(slot_idx);
                         let elapsed_enough = self.slots.get(slot_idx)
@@ -891,6 +918,7 @@ impl ChargerApp {
             
             AppMessage::StopTask(slot_id) => {
                 let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                self.slot_command_pending[slot_id.0] = Some((Instant::now(), self.slots[slot_id.0].state.clone()));
                 
                 if verbose {
                     println!("[STOP-SLOT] Stopping slot {} only", slot_id.0 + 1);
@@ -1377,6 +1405,10 @@ impl ChargerApp {
                     let chemistry = state.chemistry;
                     let mode = state.mode;
                     
+                    // Mark slot command pending + auto-select this slot
+                    self.slot_command_pending[slot_id.0] = Some((Instant::now(), self.slots[slot_id.0].state.clone()));
+                    self.selected_slot = Some(slot_id.0);
+                    
                     // Save config for this slot, then close dialog
                     // Persist to disk so it survives app restarts
                     let persisted = crate::slot_persist::PersistedSlotConfig {
@@ -1404,15 +1436,13 @@ impl ChargerApp {
                             }
                             
                             // Convert mode
-                            // NOTE: Break-In (0x05) causes device to abort after ~42s.
-                            // The official app sends Discharge (0x02) with break-in parameters.
                             let bt_mode = match mode {
                                 ChargeMode::Charge => OperationMode::Charge,
                                 ChargeMode::Storage => OperationMode::Storage,
                                 ChargeMode::Discharge => OperationMode::Discharge,
                                 ChargeMode::Cycle => OperationMode::Cycle,
                                 ChargeMode::Refresh => OperationMode::Refresh,
-                                ChargeMode::BreakIn => OperationMode::Discharge,
+                                ChargeMode::BreakIn => OperationMode::BreakIn,
                             };
                             
                             // Convert chemistry
@@ -1507,6 +1537,7 @@ impl ChargerApp {
             AppMessage::SimpleAutoCharge => {
                 // Simple auto-charge: detect Li-Ion/NiMH and charge at 500mA
                 let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                self.buttons_locked_until = Some(Instant::now() + std::time::Duration::from_secs(5));
                 
                 if verbose {
                     println!("[SIMPLE-AUTO] Starting simple auto-charge for all idle slots at 500mA...");
@@ -1654,6 +1685,7 @@ impl ChargerApp {
             
             AppMessage::SmartChargeAll => {
                 let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                self.buttons_locked_until = Some(Instant::now() + std::time::Duration::from_secs(5));
                 
                 if verbose {
                     println!("[AUTO-CHARGE] Starting auto-charge for all idle slots...");
@@ -2025,6 +2057,8 @@ impl ChargerApp {
             &self.config_dialog_state,
             self.show_detailed_stats,
             &self.profile_store,
+            self.buttons_locked(),
+            &self.slot_command_pending,
         )
     }
 
@@ -2074,6 +2108,13 @@ impl ChargerApp {
             crate::settings::AppTheme::Light => Theme::Light,
             crate::settings::AppTheme::Dark => Theme::Dark,
         }
+    }
+
+    /// Returns true if Auto/SmartCharge buttons should be disabled (5s cooldown)
+    fn buttons_locked(&self) -> bool {
+        self.buttons_locked_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false)
     }
 }
 

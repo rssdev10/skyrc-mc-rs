@@ -50,6 +50,10 @@ ChargerApp (state machine)
 
 - Slot panels with battery inserted (voltage > 0) are rendered with a lighter background.
 - The ⚙ Settings button opens a full-page settings view (theme, BT persistence, about).
+- Graph voltage scale auto-adjusts to the selected slot's data range only.
+- Auto and SmartCharge buttons are disabled for 5 seconds after clicking (cooldown).
+- Configure & Start and Stop buttons are disabled until the device confirms status via notification.
+- After Configure & Start completes, the started slot is auto-selected in the graph.
 
 ### Config Dialog (modal overlay)
 

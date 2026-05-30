@@ -8,7 +8,7 @@ use crate::app::AppMessage;
 use crate::i18n::t;
 use crate::slot::{Slot, SlotState, TaskConfig, TaskType, BatteryChemistry};
 
-pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize) -> Element<'a, AppMessage> {
+pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize, cmd_pending: bool) -> Element<'a, AppMessage> {
     if is_configuring {
         return config_dialog_view(slot, config);
     }
@@ -84,10 +84,16 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         .spacing(2)
         .width(Length::Fill);
 
-        let stop_button = button(text(t!("btn.stop").to_string()).size(14))
-            .on_press(AppMessage::StopTask(slot.id))
-            .style(button::danger)
-            .padding([8, 12]);
+        let stop_button = if cmd_pending {
+            button(text(t!("btn.stop").to_string()).size(14))
+                .style(button::danger)
+                .padding([8, 12])
+        } else {
+            button(text(t!("btn.stop").to_string()).size(14))
+                .on_press(AppMessage::StopTask(slot.id))
+                .style(button::danger)
+                .padding([8, 12])
+        };
 
         row![
             progress_section,
@@ -102,7 +108,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
             .style(button::primary)
             .padding([8, 12]);
 
-        if is_connected {
+        if is_connected && !cmd_pending {
             let voltage = slot.current_voltage;
             btn = btn.on_press(AppMessage::ShowConfigDialog(slot.id, voltage));
         }

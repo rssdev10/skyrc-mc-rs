@@ -5,12 +5,12 @@ use iced::{
     widget::{button, column, container, row, text, tooltip},
     Element, Length,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::app::{AppMessage, ConnectionStatus};
 use crate::i18n::t;
 use mc5000_protocol::{Device, DeviceManager};
-use crate::slot::{Slot, SlotId, TaskConfig};
+use crate::slot::{Slot, SlotId, SlotState, TaskConfig};
 use crate::data::DataLogger;
 
 use components::{device_panel, slot_panel, graph_panel, data_panel};
@@ -30,6 +30,8 @@ pub fn main_view<'a>(
     config_dialog_state: &'a Option<components::config_dialog::ConfigDialogState>,
     show_detailed_stats: bool,
     profile_store: &'a crate::profiles::ProfileStore,
+    buttons_locked: bool,
+    slot_command_pending: &'a [Option<(Instant, SlotState)>; 4],
 ) -> Element<'a, AppMessage> {
     // If config dialog is active, show it instead of the main view
     if let Some(state) = config_dialog_state {
@@ -46,7 +48,7 @@ pub fn main_view<'a>(
     );
 
     // Slots section with Auto/Smart/Stop buttons in the header row
-    let slots_section = create_slots_section(slots, slot_configs, configuring_slot, connection_status, selected_slot);
+    let slots_section = create_slots_section(slots, slot_configs, configuring_slot, connection_status, selected_slot, buttons_locked, slot_command_pending);
 
     // Data panel (stats + export) on the left, graph fills the rest
     let data_section = data_panel::view(data_logger, show_detailed_stats);
@@ -78,11 +80,14 @@ fn create_slots_section<'a>(
     configuring_slot: &'a Option<SlotId>,
     connection_status: &'a ConnectionStatus,
     selected_slot: Option<usize>,
+    buttons_locked: bool,
+    slot_command_pending: &'a [Option<(Instant, SlotState)>; 4],
 ) -> Element<'a, AppMessage> {
     let is_connected = matches!(connection_status, ConnectionStatus::Connected);
+    let buttons_enabled = is_connected && !buttons_locked;
 
     // Auto/SmartCharge/Stop All buttons aligned right
-    let auto_button = if is_connected {
+    let auto_button = if buttons_enabled {
         button(text(t!("btn.auto").to_string()).size(14))
             .on_press(AppMessage::SimpleAutoCharge)
             .padding([4, 10])
@@ -97,7 +102,7 @@ fn create_slots_section<'a>(
     )
     .delay(Duration::from_millis(500));
 
-    let smart_button = if is_connected {
+    let smart_button = if buttons_enabled {
         button(text(t!("btn.smart_charge").to_string()).size(14))
             .on_press(AppMessage::SmartChargeAll)
             .padding([4, 10])
@@ -144,7 +149,11 @@ fn create_slots_section<'a>(
             let config = slot_configs.get(idx).and_then(|c| c.as_ref());
             let is_configuring = configuring_slot.map(|id| id.0 == idx).unwrap_or(false);
             let is_selected = selected_slot == Some(idx);
-            slot_panel::view(slot, config, is_configuring, is_connected, is_selected, idx)
+            let cmd_pending = slot_command_pending[idx]
+                .as_ref()
+                .map(|(t, _)| t.elapsed().as_secs() < 10)
+                .unwrap_or(false);
+            slot_panel::view(slot, config, is_configuring, is_connected, is_selected, idx, cmd_pending)
         })
         .collect();
 

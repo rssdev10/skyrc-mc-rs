@@ -84,7 +84,7 @@ impl TimeAlignedCsvFormat {
         // Add data for each of the 4 slots (current_mA, voltage_V, state, mode, resistance_mOhm, elapsed_time_sec)
         for slot_idx in 0..4 {
             if let Some(data) = &row.slots[slot_idx] {
-                record.push(format!("{:.1}", data.current * 1000.0)); // current in mA
+                record.push(format!("{:.1}", data.current)); // current in mA
                 record.push(format!("{:.3}", data.voltage));
                 record.push(data.state.clone());
                 record.push(data.mode.clone());
@@ -131,7 +131,7 @@ impl ExportFormat for CsvFormat {
         csv_writer.write_record(&[
             measurement.timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             (measurement.slot_id.0 + 1).to_string(),  // 1-based slot numbering
-            format!("{:.1}", measurement.current * 1000.0),  // Convert A to mA
+            format!("{:.1}", measurement.current),  // current in mA
             format!("{:.3}", measurement.voltage),
             measurement.state.clone(),
             measurement.mode.clone(),
