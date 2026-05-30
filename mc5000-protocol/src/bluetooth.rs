@@ -132,6 +132,35 @@ pub enum OperationMode {
 }
 
 impl OperationMode {
+    /// Convert to protocol byte. The byte value depends on chemistry because
+    /// NiMH/NiCd have Break-In and Refresh modes that shift the values.
+    ///
+    /// Li-Ion/LiFePO4: Charge=0x00, Storage=0x01, Discharge=0x02, Cycle=0x03
+    /// NiMH/NiCd:     Charge=0x00, BreakIn=0x02, Discharge=0x03, Cycle=0x04, Refresh=0x05
+    pub fn to_byte_for_chemistry(self, chemistry: BatteryChemistry) -> u8 {
+        match chemistry {
+            BatteryChemistry::NiMH | BatteryChemistry::NiCd |
+            BatteryChemistry::Eneloop | BatteryChemistry::NiZn => match self {
+                OperationMode::Charge => 0x00,
+                OperationMode::Refresh => 0x01,
+                OperationMode::BreakIn => 0x02,
+                OperationMode::Discharge => 0x03,
+                OperationMode::Cycle => 0x04,
+                OperationMode::Storage => 0x01, // Not typical for NiMH
+            },
+            _ => match self {
+                // Li-Ion, LiFePO4
+                OperationMode::Charge => 0x00,
+                OperationMode::Storage => 0x01,
+                OperationMode::Discharge => 0x02,
+                OperationMode::Cycle => 0x03,
+                OperationMode::BreakIn => 0x02,  // Not available for Li-Ion, fallback
+                OperationMode::Refresh => 0x03,  // Not available for Li-Ion, fallback
+            },
+        }
+    }
+
+    /// Legacy byte conversion (uses Li-Ion mapping for backward compatibility)
     pub fn to_byte(self) -> u8 {
         match self {
             OperationMode::Charge => 0x00,
@@ -143,7 +172,7 @@ impl OperationMode {
         }
     }
 
-    /// Parse operation mode from protocol byte
+    /// Parse operation mode from protocol byte (Li-Ion mapping)
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0x00 => Some(OperationMode::Charge),
@@ -462,8 +491,8 @@ impl MC5000Protocol {
         // Byte 0: Channel bitmask (0x01/0x02/0x04/0x08, or 0x00 for all slots)
         data.push(config.channel_bitmask);
         
-        // Byte 1: Mode
-        data.push(config.mode.to_byte());
+        // Byte 1: Mode (chemistry-dependent byte mapping)
+        data.push(config.mode.to_byte_for_chemistry(config.chemistry));
         
         // Bytes 2-3: Charge current (mA, big-endian)
         data.push((config.charge_current_ma >> 8) as u8);
@@ -1257,7 +1286,7 @@ impl ChargeConfig {
         config
     }
     
-    /// Create a cycle (charge/discharge) configuration (mode 0x03)
+    /// Create a cycle (charge/discharge) configuration (mode 0x04)
     ///
     /// From protocol capture 3: Cycle D→C was observed with cycle_direction=0x01 in the config
     /// packet. The charger starts with discharge (status 0x07) then transitions to charge.
@@ -1270,7 +1299,7 @@ impl ChargeConfig {
         config
     }
     
-    /// Create a refresh configuration (mode 0x04)
+    /// Create a refresh configuration (mode 0x05)
     ///
     /// Refresh is a deep-cycle mode available for NiMH and NiCd chemistries.
     /// It performs charge/discharge cycles to restore battery capacity.
@@ -1283,16 +1312,13 @@ impl ChargeConfig {
         config
     }
     
-    /// Create a break-in configuration (mode 0x05)
+    /// Create a break-in configuration (mode 0x02)
     ///
     /// Break-in is a conditioning mode for new NiMH/NiCd batteries.
     /// It performs gentle charge/discharge cycles (C→D→C) to condition the cells.
     /// The charge current is typically low (0.1-0.3C rate).
     pub fn break_in(slot: u8, chemistry: BatteryChemistry, capacity_mah: u16, charge_current_ma: u16) -> Self {
-        // NOTE: The official app sends mode 0x02 (Discharge) for break-in, NOT 0x05.
-        // Mode 0x05 causes the device to abort after ~42 seconds.
-        // Capture 3 confirmed: break-in = Discharge mode with specific parameters.
-        let mut config = Self::new(slot, chemistry, OperationMode::Discharge, capacity_mah, charge_current_ma);
+        let mut config = Self::new(slot, chemistry, OperationMode::BreakIn, capacity_mah, charge_current_ma);
         // Capture shows discharge current = 2× charge current for break-in
         config.discharge_current_ma = charge_current_ma.saturating_mul(2);
         // Match capture: cutoff_timer = 60min, max_time = 300min
@@ -1518,7 +1544,7 @@ pub enum MC5000SlotState {
 
 impl MC5000SlotStatus {
     /// Parse channel status from 0x91 command response
-    /// Response format: 0f 15 91 <channel:1> <status:1> <temp:1> <voltage:2> <??:4> <capacity:4> <current:2> <??:4> <checksum:1>
+    /// Response format: 0f 15 91 <channel:1> <current_hi:1> <current_lo:1> <voltage:2> ...
     pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
         if response.len() < 10 {
             return Err(BluetoothError::CommunicationError(
@@ -1553,107 +1579,56 @@ impl MC5000SlotStatus {
             _ => 0,
         };
 
-        // Byte 4: status byte from device
-        let status_byte = response[4];
-
-        // Byte 5: observed as discharge current when status=0 (0xF9 = 249mA)
-        // OR as charge current multiplier (byte5 * 4 ≈ charge current mA)
-        let byte5 = response[5];
+        // Bytes 4-5: current in mA as a big-endian u16.
+        // Previously misinterpreted as separate "status byte" + "multiplier byte".
+        // Empirically confirmed:  100mA→[0x00,0x63]=99,  150mA→[0x00,0x95]=149,
+        //   200mA→[0x00,0xC5]=197,  300mA→[0x01,0x2A]=298,  700mA→[0x02,0xBD]=701.
+        // The high byte is the mA hundreds/thousands; low byte is the remainder.
+        let current_ma = u16::from_be_bytes([response[4], response[5]]);
 
         // Voltage at offset 6-7 (big-endian, in mV)
         let voltage_mv = u16::from_be_bytes([response[6], response[7]]);
 
         // Capacity at bytes 10-11 (big-endian u16, mAh).
-        // Bytes 12-13 are reserved/unknown (always 0x00 0x00 in captures).
-        // NOTE: Previous code had a fallback to bytes 12-15 as u32, but bytes 14-15
-        // are actually elapsed_seconds — that fallback was a bug.
         let capacity_mah = if response.len() >= 12 {
             u16::from_be_bytes([response[10], response[11]]) as u32
         } else {
             0
         };
 
-        // Current heuristics from captures:
-        // - Charging (status 0x01/0x02/0x03/0x05/0x06): byte5 * 4 ≈ mA
-        // - Discharging (status 0x07): byte5 * 10 ≈ mA (different multiplier for discharge)
-        // - NiMH charging (status 0x00 with byte5>0): byte5 * 4 ≈ mA
-        // - Idle/Completed (status 0x00 with byte5=0): 0 mA
-        let current_ma = match status_byte {
-            0x01 | 0x02 | 0x03 | 0x05 | 0x06 => (byte5 as u16).saturating_mul(4),
-            0x07 => (byte5 as u16).saturating_mul(10), // Discharging uses ~10x multiplier
-            0x00 if byte5 > 0 => (byte5 as u16).saturating_mul(4), // NiMH charging uses status 0x00
-            _ => 0,  // For status 0x00 with byte5=0, idle/completed
-        };
-
-        // Elapsed time: bytes 14-15 observed as seconds (0x0708 ≈ 1800s = 30m)
+        // Elapsed time: bytes 14-15 (big-endian, seconds)
         let elapsed_seconds = if response.len() >= 16 {
             u16::from_be_bytes([response[14], response[15]])
         } else {
             0
         };
 
-        // Resistance: bytes 16-17 appear as milliohms in both discharge and charge captures
+        // Resistance: bytes 16-17 (big-endian, milliohms)
         let resistance_milliohm = if response.len() >= 18 {
             u16::from_be_bytes([response[16], response[17]])
         } else {
             0
         };
 
-        // Delta-V: byte 18 contains voltage drop detection (used for charge termination)
-        // Higher values indicate larger voltage drop. Device shows "Done" when this is low (≤5)
+        // Delta-V: byte 18 (NiMH charge termination indicator, mV)
         let deltav_mv = if response.len() >= 19 {
             response[18]
         } else {
             0
         };
 
-        // Interpret status
-        // 0x00 = Idle/Empty/Charging/Discharging (disambiguate by voltage, current, and other indicators)
-        // 0x01 = CC Charging, 0x02 = CV Charging, 0x03 = Charging, 0x04 = Completed, 0x09 = Paused
-        let state = match status_byte {
-            0x00 => {
-                // Status 0x00 can mean Idle, Empty, Charging, or Done!
-                // The MC5000 uses status 0x00 for various states:
-                // - Empty: voltage = 0
-                // - Charging NiMH/NiCd: voltage < 2000mV + current flow (these don't use 0x01/0x02/0x03)
-                // - Charging Li-Ion: voltage > 3000mV + current flow (early phase before CC/CV kicks in)
-                // - Completed: has elapsed time but no current flow and low deltaV
-                // - Idle: voltage present but no activity
-                // 
-                // NOTE: We cannot reliably distinguish charging vs discharging from status alone
-                // when byte5 > 0. We default to Charging since that's more common. Users can
-                // check the actual operation mode from their configuration.
-                if voltage_mv == 0 {
-                    MC5000SlotState::Empty
-                } else if byte5 > 0 {
-                    // Current is flowing - device is active
-                    // Could be charging or discharging, but we can't tell from status alone
-                    // Default to Charging since that's the most common operation
-                    MC5000SlotState::Charging
-                } else if deltav_mv <= 5 && elapsed_seconds > 0 {
-                    // Just finished: has elapsed time but no current flow and low deltaV
-                    MC5000SlotState::Completed
-                } else {
-                    MC5000SlotState::Idle
-                }
-            }
-            0x01 => MC5000SlotState::ChargingCC, // Constant Current phase
-            0x02 => MC5000SlotState::ChargingCV, // Constant Voltage phase
-            0x03 => MC5000SlotState::Charging,   // Generic charging
-            0x04 => MC5000SlotState::Completed,  // Charging complete
-            0x05 => {
-                // Status 0x05 observed for Li-Ion charging at target voltage (4.2V)
-                // This appears to be a trickle/maintenance charge phase
-                MC5000SlotState::ChargingCV
-            }
-            0x06 => MC5000SlotState::Charging, // Another charging mode
-            0x07 => {
-                // Status 0x07 observed for Li-Ion discharging
-                // Observed at ~3.96V during active discharge
-                MC5000SlotState::Discharging
-            }
-            0x09 => MC5000SlotState::Paused,     // Charging paused
-            _ => MC5000SlotState::Idle,
+        // Derive device state from current + voltage + capacity/elapsed.
+        // There is no separate status/mode byte — bytes [4-5] are the current itself.
+        let state = if voltage_mv == 0 {
+            MC5000SlotState::Empty
+        } else if current_ma > 0 {
+            // Active: charging or discharging. Direction is tracked by the app via task type.
+            MC5000SlotState::Charging
+        } else if elapsed_seconds > 0 && capacity_mah > 0 {
+            // Current dropped to zero after some activity → cycle finished.
+            MC5000SlotState::Completed
+        } else {
+            MC5000SlotState::Idle
         };
 
         Ok(MC5000SlotStatus {

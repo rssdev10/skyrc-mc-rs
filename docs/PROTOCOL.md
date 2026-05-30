@@ -161,8 +161,7 @@ Example from real device:
 | 1 | 15 | Length (21 = 0x15) | ✓ |
 | 2 | 91 | Command | ✓ |
 | 3 | XX | Channel (0x01/0x02/0x04/0x08 = slot 1/2/3/4) | ✓ |
-| 4 | XX | Status byte (see below) | ✓ |
-| 5 | XX | **Current multiplier**: charging: current_mA = byte5 × 4; discharging (status 0x07): current_mA = byte5 × 10 | ✓ |
+| 4-5 | XX XX | **Current (mA, big-endian u16)**: e.g. 0x012A = 298mA, 0x02BD = 701mA. Zero when idle/completed. Previously misinterpreted as separate "status byte" + "current multiplier" — both bytes together form the current. | ✓ |
 | 6-7 | XX XX | **Voltage in mV** (big-endian): e.g., 0x059D = 1437mV | ✓ |
 | 8 | 00 | Unknown (always 0x00 observed) | ? |
 | 9 | 00 | Unknown (always 0x00 observed) | ? |
