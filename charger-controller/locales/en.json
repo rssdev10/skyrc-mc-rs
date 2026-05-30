@@ -94,5 +94,10 @@
   "config.apply_profile": "Apply",
   "config.export_profiles": "Export",
   "config.import_profiles": "Import",
-  "config.profile_name": "Profile name"
+  "config.profile_name": "Profile name",
+  "tooltip.auto": "Automatically detect battery type\nin non-active slots and start\ncharging with 500mA",
+  "tooltip.smart_charge": "Automatically detect battery type\nin non-active slots, determine current\nbased on internal resistance,\nand start charging",
+  "tooltip.stop_all": "Stop all processes for all slots",
+  "tooltip.settings": "Open settings dialog",
+  "tooltip.configure_start": "Open battery configuration dialog\nand start process after confirmation"
 }

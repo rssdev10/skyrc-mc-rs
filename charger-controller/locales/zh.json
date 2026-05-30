@@ -94,5 +94,10 @@
   "config.apply_profile": "应用",
   "config.export_profiles": "导出",
   "config.import_profiles": "导入",
-  "config.profile_name": "配置名称"
+  "config.profile_name": "配置名称",
+  "tooltip.auto": "自动检测非活动槽位的电池类型\n并以500mA电流开始充电",
+  "tooltip.smart_charge": "自动检测非活动槽位的电池类型\n根据内阻确定电流\n并开始充电",
+  "tooltip.stop_all": "停止所有槽位的所有进程",
+  "tooltip.settings": "打开设置对话框",
+  "tooltip.configure_start": "打开电池配置对话框\n确认后启动进程"
 }

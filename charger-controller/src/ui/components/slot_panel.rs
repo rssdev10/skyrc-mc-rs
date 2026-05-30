@@ -1,7 +1,8 @@
 use iced::{
-    widget::{button, column, container, row, text, progress_bar, pick_list, text_input, mouse_area},
+    widget::{button, column, container, row, text, progress_bar, pick_list, text_input, mouse_area, tooltip},
     Element, Length, Border,
 };
+use std::time::Duration;
 
 use crate::app::AppMessage;
 use crate::i18n::t;
@@ -106,7 +107,14 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
             btn = btn.on_press(AppMessage::ShowConfigDialog(slot.id, voltage));
         }
 
-        container(btn)
+        let btn_tooltip = tooltip(
+            btn,
+            container(text(t!("tooltip.configure_start").to_string()).size(12)).padding(5).style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .delay(Duration::from_millis(500));
+
+        container(btn_tooltip)
             .width(Length::Fill)
             .align_x(iced::Center)
             .padding([0, 10])

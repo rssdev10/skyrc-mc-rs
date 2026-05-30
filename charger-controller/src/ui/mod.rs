@@ -2,9 +2,10 @@ pub mod message;
 pub mod components;
 
 use iced::{
-    widget::{button, column, container, row, text},
+    widget::{button, column, container, row, text, tooltip},
     Element, Length,
 };
+use std::time::Duration;
 
 use crate::app::{AppMessage, ConnectionStatus};
 use crate::i18n::t;
@@ -89,6 +90,12 @@ fn create_slots_section<'a>(
     } else {
         button(text(t!("btn.auto").to_string()).size(14)).padding([4, 10])
     };
+    let auto_tooltip = tooltip(
+        auto_button,
+        container(text(t!("tooltip.auto").to_string()).size(12)).padding(5).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .delay(Duration::from_millis(500));
 
     let smart_button = if is_connected {
         button(text(t!("btn.smart_charge").to_string()).size(14))
@@ -98,6 +105,12 @@ fn create_slots_section<'a>(
     } else {
         button(text(t!("btn.smart_charge").to_string()).size(14)).padding([4, 10])
     };
+    let smart_tooltip = tooltip(
+        smart_button,
+        container(text(t!("tooltip.smart_charge").to_string()).size(12)).padding(5).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .delay(Duration::from_millis(500));
 
     let stop_all_button = if is_connected {
         button(text(t!("btn.stop_all").to_string()).size(14))
@@ -107,13 +120,19 @@ fn create_slots_section<'a>(
     } else {
         button(text(t!("btn.stop_all").to_string()).size(14)).padding([4, 10])
     };
+    let stop_all_tooltip = tooltip(
+        stop_all_button,
+        container(text(t!("tooltip.stop_all").to_string()).size(12)).padding(5).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .delay(Duration::from_millis(500));
 
     let header_row = row![
         text(t!("label.charging_slots").to_string()).size(18),
         iced::widget::space::horizontal(),
-        auto_button,
-        smart_button,
-        stop_all_button,
+        auto_tooltip,
+        smart_tooltip,
+        stop_all_tooltip,
     ]
     .spacing(5)
     .align_y(iced::Center);

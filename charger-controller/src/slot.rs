@@ -317,10 +317,9 @@ impl Slot {
             BatteryChemistry::LTO
         } else if v >= 1.7 {
             BatteryChemistry::NiZn
-        } else if v >= 1.3 {
-            BatteryChemistry::NiMH
         } else {
-            BatteryChemistry::LiIon
+            // Below 1.7V: NiMH/NiCd (nominal 1.2V, discharged can be 0.8-1.3V)
+            BatteryChemistry::NiMH
         }
     }
 

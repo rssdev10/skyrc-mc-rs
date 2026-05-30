@@ -94,5 +94,10 @@
   "config.apply_profile": "Aplicar",
   "config.export_profiles": "Exportar",
   "config.import_profiles": "Importar",
-  "config.profile_name": "Nombre del perfil"
+  "config.profile_name": "Nombre del perfil",
+  "tooltip.auto": "Detectar automáticamente el tipo de batería\nen slots inactivos e iniciar\ncarga con 500mA",
+  "tooltip.smart_charge": "Detectar automáticamente el tipo de batería\nen slots inactivos, determinar corriente\nsegún resistencia interna\ne iniciar carga",
+  "tooltip.stop_all": "Detener todos los procesos en todos los slots",
+  "tooltip.settings": "Abrir diálogo de ajustes",
+  "tooltip.configure_start": "Abrir diálogo de configuración de batería\ne iniciar proceso tras confirmación"
 }

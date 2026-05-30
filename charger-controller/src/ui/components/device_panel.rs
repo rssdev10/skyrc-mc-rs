@@ -1,5 +1,5 @@
 use iced::{
-    widget::{button, container, pick_list, row, text},
+    widget::{button, container, pick_list, row, text, tooltip},
     Element, Length,
 };
 
@@ -87,13 +87,18 @@ pub fn view<'a>(
     let settings_button = button(text("⚙").size(16))
         .on_press(AppMessage::SettingsOpen)
         .padding([4, 8]);
+    let settings_tooltip = tooltip(
+        settings_button,
+        container(text(t!("tooltip.settings").to_string()).size(12)).padding(5).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    );
 
     container(
         row![
             device_controls,
             iced::widget::space::horizontal(),
             status_text,
-            settings_button,
+            settings_tooltip,
         ]
         .spacing(10)
         .align_y(iced::Center)

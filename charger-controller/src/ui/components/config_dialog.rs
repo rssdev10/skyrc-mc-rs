@@ -51,10 +51,9 @@ impl ConfigDialogState {
             BatteryChemistry::LTO  // 2.8V nominal
         } else if voltage_v >= 1.7 {
             BatteryChemistry::NiZn  // 1.85V nominal
-        } else if voltage_v >= 1.3 {
-            BatteryChemistry::NiMH  // 1.65V nominal (or NiCd)
         } else {
-            BatteryChemistry::LiIon  // Default fallback
+            // Below 1.7V: NiMH/NiCd (nominal 1.2V, discharged can be 0.8-1.3V)
+            BatteryChemistry::NiMH
         }
     }
 

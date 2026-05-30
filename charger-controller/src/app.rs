@@ -91,6 +91,8 @@ pub enum AppMessage {
     SettingsChangeLanguage(String),
     SettingsToggleSaveDevice,
     SettingsOpenRepo,
+    // CLI debug mode
+    CliCommand(String),
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +219,29 @@ fn notification_stream(
             Some((AppMessage::Tick, (peripheral, stream_opt)))
         },
     )
+}
+
+/// Subscription that reads stdin lines and emits CliCommand messages (debug mode only)
+#[cfg(debug_assertions)]
+fn cli_debug_stream() -> impl futures::stream::Stream<Item = AppMessage> {
+    futures::stream::unfold((), |()| async {
+        let line = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf).ok()?;
+            Some(buf.trim().to_string())
+        })
+        .await
+        .ok()
+        .flatten();
+
+        match line {
+            Some(cmd) if !cmd.is_empty() => Some((AppMessage::CliCommand(cmd), ())),
+            _ => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Some((AppMessage::Tick, ()))
+            }
+        }
+    })
 }
 
 impl ChargerApp {
@@ -377,7 +402,16 @@ impl ChargerApp {
                                 status.resistance_milliohm,
                                 status.elapsed_seconds
                             );
-                            slot.set_state(map_bt_state(&status.state));
+                            let new_state = map_bt_state(&status.state);
+                            // Don't downgrade from Charging to Idle within 10s of starting.
+                            // The MC5000 reports 0x00 (Idle) during NiMH charge startup
+                            // until current actually starts flowing.
+                            let should_protect = slot.is_active()
+                                && new_state == SlotState::Idle
+                                && slot.start_time.map(|t| t.elapsed().as_secs() < 10).unwrap_or(false);
+                            if !should_protect {
+                                slot.set_state(new_state);
+                            }
                         }
                         
                         // Check if this slot is in auto-charge mode and has valid resistance
@@ -401,8 +435,20 @@ impl ChargerApp {
                             // Calculate safe current: limit voltage drop to ~0.3V max
                             let max_current_from_resistance = (300.0 / resistance_ohm) as u16; // in mA
                             
-                            // Use conservative rate: 0.5C or resistance-limited, whichever is lower
-                            let target_current = ((base_current_1c * 0.5) as u16).min(max_current_from_resistance).max(300);
+                            // Determine chemistry-based max current
+                            let chemistry_max: u16 = self.slots.get(slot_idx)
+                                .and_then(|s| s.current_task.as_ref())
+                                .map(|task| match task.battery_chemistry {
+                                    BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop => 500,
+                                    _ => 3000, // Li-Ion variants can go higher
+                                })
+                                .unwrap_or(500);
+                            
+                            // Use conservative rate: 0.5C or resistance-limited or chemistry-limited, whichever is lowest
+                            let target_current = ((base_current_1c * 0.5) as u16)
+                                .min(max_current_from_resistance)
+                                .min(chemistry_max)
+                                .max(300);
                             
                             if verbose {
                                 println!("[AUTO-CHARGE] Slot {}: R={}mΩ, adjusting current to {}mA (max from R: {}mA)",
@@ -793,12 +839,7 @@ impl ChargerApp {
                 if let Some(ref mut device) = self.connected_device {
                     if let Some(proto) = device.bluetooth_protocol.as_mut() {
                         if verbose {
-                            println!("[GUI VERBOSE] Starting task on slot {}", slot_id.0 + 1);
-                        }
-
-                        // Init sequence required before config commands
-                        if let Err(e) = self.rt.block_on(proto.send_init_sequence()) {
-                            log::error!("Failed to send init sequence: {}", e);
+                            println!("[START-SLOT] Starting task on slot {}", slot_id.0 + 1);
                         }
 
                         let charge_config = task_to_charge_config(slot_id.0, &config);
@@ -812,7 +853,9 @@ impl ChargerApp {
                         let start_cmd = MC5000Protocol::build_start_stop_command(
                             StartStopAction::ChannelMask(1 << slot_id.0)
                         );
-                        eprintln!("[START] Slot {} start mask=0x{:02X}", slot_id.0 + 1, 1u8 << slot_id.0);
+                        if verbose {
+                            println!("[START-SLOT] Slot {} start mask=0x{:02X}", slot_id.0 + 1, 1u8 << slot_id.0);
+                        }
                         
                         if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
                             log::error!("Failed to start charging: {}", e);
@@ -821,28 +864,120 @@ impl ChargerApp {
                 }
 
                 if let Some(slot) = self.slots.get_mut(slot_id.0) {
-                    slot.start_task(config);
+                    slot.start_task(config.clone());
                 }
+                self.slot_configs[slot_id.0] = Some(config);
                 Task::none()
             }
             
-            // StopTask and StopAllSlots both perform stop-all on the device.
-            // The MC5000 protocol requires an init sequence (0x74, 0x65, 0xFE)
-            // before stop-all commands are accepted. Per-slot stop is not supported
-            // because the init sequence clears device config state.
-            AppMessage::StopTask(_) | AppMessage::StopAllSlots => {
+            AppMessage::StopTask(slot_id) => {
+                let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                
+                if verbose {
+                    println!("[STOP-SLOT] Stopping slot {} only", slot_id.0 + 1);
+                }
+                
+                // Collect slots that should REMAIN active (all active except the one being stopped)
+                let remaining_active: Vec<(usize, Option<TaskConfig>)> = self.slots.iter()
+                    .enumerate()
+                    .filter(|(i, s)| *i != slot_id.0 && s.is_active())
+                    .map(|(i, _)| (i, self.slot_configs[i].clone()))
+                    .collect();
+                
                 if let Some(ref mut device) = self.connected_device {
                     if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                        // Init sequence required for device to accept stop command
-                        let _ = self.rt.block_on(proto.send_init_sequence());
+                        // Protocol (from btsnoop capture): FE query → StopAll → [FE → Config → Start] per remaining slot
+                        // The FE query "selects" the slot context; device ignores 0x93 without it.
+                        let slot_mask: u8 = 1 << slot_id.0;
+                        let fe_cmd = MC5000Protocol::build_fe_query_command_for(slot_mask);
+                        let _ = self.rt.block_on(proto.send_command(&fe_cmd));
+                        self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+
                         let stop_cmd = MC5000Protocol::build_start_stop_command(
                             StartStopAction::StopAll
                         );
                         let _ = self.rt.block_on(proto.send_command(&stop_cmd));
+                        
+                        if verbose {
+                            println!("[STOP-SLOT] Sent FE(0x{:02X}) + StopAll, will re-start {} remaining slots", slot_mask, remaining_active.len());
+                        }
+                        
+                        // Re-start remaining active slots (protocol: FE → Config → Start for each)
+                        if !remaining_active.is_empty() {
+                            self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                            
+                            for (idx, config_opt) in &remaining_active {
+                                if let Some(config) = config_opt {
+                                    let remaining_mask: u8 = 1 << *idx;
+                                    
+                                    // FE query for this slot (required before config/start)
+                                    let fe_cmd = MC5000Protocol::build_fe_query_command_for(remaining_mask);
+                                    let _ = self.rt.block_on(proto.send_command(&fe_cmd));
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+
+                                    let charge_config = task_to_charge_config(*idx, config);
+                                    let cmd = MC5000Protocol::build_charge_config_command(&charge_config);
+                                    let _ = self.rt.block_on(proto.send_command(&cmd));
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                    
+                                    let start_cmd = MC5000Protocol::build_start_stop_command(
+                                        StartStopAction::ChannelMask(remaining_mask)
+                                    );
+                                    let _ = self.rt.block_on(proto.send_command(&start_cmd));
+                                    
+                                    if verbose {
+                                        println!("[STOP-SLOT] Re-started slot {} (FE+Config+Start mask 0x{:02X})", idx + 1, remaining_mask);
+                                    }
+                                    
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                } else if verbose {
+                                    println!("[STOP-SLOT] Slot {} was active but has no saved config, cannot re-start", idx + 1);
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Stop all slots in UI (stop-all affects all)
+                // Only mark the stopped slot as stopped in UI
+                if let Some(slot) = self.slots.get_mut(slot_id.0) {
+                    slot.stop();
+                }
+                self.slot_configs[slot_id.0] = None;
+                Task::none()
+            }
+            
+            AppMessage::StopAllSlots => {
+                let verbose = std::env::var("MC5000_VERBOSE").is_ok();
+                
+                if verbose {
+                    println!("[STOP-ALL] Stopping all slots");
+                }
+                
+                if let Some(ref mut device) = self.connected_device {
+                    if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                        // Protocol: FE query required before StopAll (0x93 0x00)
+                        // Use bitmask of all active slots, or general query if none tracked
+                        let active_mask: u8 = self.slots.iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.is_active())
+                            .fold(0u8, |acc, (i, _)| acc | (1 << i));
+                        let fe_mask = if active_mask != 0 { active_mask } else { 0x0F };
+                        
+                        let fe_cmd = MC5000Protocol::build_fe_query_command_for(fe_mask);
+                        let _ = self.rt.block_on(proto.send_command(&fe_cmd));
+                        self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+
+                        let stop_cmd = MC5000Protocol::build_start_stop_command(
+                            StartStopAction::StopAll
+                        );
+                        let _ = self.rt.block_on(proto.send_command(&stop_cmd));
+                        
+                        if verbose {
+                            println!("[STOP-ALL] Sent FE(0x{:02X}) + StopAll", fe_mask);
+                        }
+                    }
+                }
+
                 for slot in &mut self.slots {
                     slot.stop();
                 }
@@ -1068,21 +1203,20 @@ impl ChargerApp {
             AppMessage::ConfigProfileNameChanged(name) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.profile_name_input = name;
+                    if state.selected_profile.is_some() {
+                        state.config_modified = true;
+                    }
                 }
                 Task::none()
             }
 
             AppMessage::ConfigSaveProfile => {
                 if let Some(state) = &self.config_dialog_state {
-                    let name = if state.profile_name_input.trim().is_empty() {
-                        crate::profiles::Profile::generate_name(
-                            state.chemistry,
-                            state.mode,
-                            &state.get_config(),
-                        )
-                    } else {
-                        state.profile_name_input.clone()
-                    };
+                    let name = crate::profiles::Profile::generate_name(
+                        state.chemistry,
+                        state.mode,
+                        &state.get_config(),
+                    );
                     let profile = crate::profiles::Profile {
                         name,
                         chemistry: state.chemistry,
@@ -1229,11 +1363,6 @@ impl ChargerApp {
                     // Send configuration to device if connected via Bluetooth
                     if let Some(ref mut device) = self.connected_device {
                         if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                            // Init sequence required before config commands
-                            if let Err(e) = self.rt.block_on(proto.send_init_sequence()) {
-                                log::error!("Failed to send init sequence: {}", e);
-                            }
-
                             if verbose {
                                 println!("[GUI VERBOSE] Starting charge from config dialog on slot {}", slot_id.0 + 1);
                                 println!("[GUI VERBOSE]   Chemistry: {:?}", chemistry);
@@ -1351,140 +1480,141 @@ impl ChargerApp {
                 if verbose {
                     println!("[SIMPLE-AUTO] Starting simple auto-charge for all idle slots at 500mA...");
                 }
-                
-                // Init sequence required before config commands
-                if let Some(ref mut device) = self.connected_device {
-                    if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                        if let Err(e) = self.rt.block_on(proto.send_init_sequence()) {
-                            log::error!("Failed to send init sequence: {}", e);
-                        }
-                    }
-                }
 
-                // Phase 1: Send config for each idle slot with a battery
-                let mut start_mask: u8 = 0;
-                for slot in &mut self.slots {
-                    if slot.is_idle() && slot.current_voltage > 0.1 {
-                        let slot_id = slot.id;
-                        let voltage = slot.current_voltage;
-                        
-                        // Auto-detect chemistry from voltage
-                        let chemistry = slot.estimate_chemistry_from_voltage();
-                        
-                        if verbose {
-                            println!("[SIMPLE-AUTO] Slot {}: Detected chemistry: {:?} ({:.3}V)", 
-                                slot_id.0 + 1, chemistry, voltage);
-                        }
-                        
-                        // Use 500mA charging current
-                        let charge_current_ma = 500;
-                        
-                        let target_voltage = chemistry.target_voltage();
-                        let cutoff_voltage = chemistry.cutoff_voltage();
-                        
-                        let bt_chem = match chemistry {
-                            BatteryChemistry::LiIon => BtChemistry::LiIon,
-                            BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
-                            BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
-                            BatteryChemistry::NiMH => BtChemistry::NiMH,
-                            BatteryChemistry::NiCd => BtChemistry::NiCd,
-                            BatteryChemistry::Eneloop => BtChemistry::Eneloop,
-                            BatteryChemistry::NiZn => BtChemistry::NiZn,
-                            BatteryChemistry::RAM => BtChemistry::RAM,
-                            BatteryChemistry::LTO => BtChemistry::LTO,
-                            BatteryChemistry::NaIon => BtChemistry::NaIon,
-                        };
-                        let config = ChargeConfig {
-                            channel_bitmask: 1 << slot_id.0,
-                            mode: OperationMode::Charge,
-                            chemistry: bt_chem,
-                            charge_current_ma,
-                            discharge_current_ma: 0,
-                            capacity_mah: 3000,
-                            target_voltage_mv: (target_voltage * 1000.0) as u16,
-                            cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
-                            charge_cutoff_current_ma: 100,
-                            discharge_cutoff_current_ma: 100,
-                            trickle_charge_ma: if matches!(chemistry, BatteryChemistry::NiCd) { 50 } else { 0 },
-                            keep_voltage_mv: 0,
-                            delta_peak_mv: if matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop) { 6 } else { 0 },
-                            cutoff_timer_min: 0,
-                            max_time_min: 300,
-                            cycle_direction: 0x00,
-                            charge_resting_min: 10,
-                            discharge_resting_min: 10,
-                            cycle_count: 1,
-                        };
-                        
-                        if let Some(ref mut device) = self.connected_device {
-                            if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                                let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
-                                
-                                match self.rt.block_on(proto.send_command(&cmd)) {
-                                    Ok(_) => {
-                                        if verbose {
-                                            println!("[SIMPLE-AUTO] Slot {}: Config sent ({}mA)", 
-                                                slot_id.0 + 1, charge_current_ma);
-                                        }
-                                        
-                                        start_mask |= 1 << slot_id.0;
-                                        
-                                        let task = TaskConfig {
-                                            task_type: TaskType::Charge,
-                                            battery_chemistry: chemistry,
-                                            target_voltage,
-                                            target_current: charge_current_ma as f32 / 1000.0,
-                                            cutoff_voltage: Some(cutoff_voltage),
-                                            capacity_limit: None,
-                                            time_limit: None,
-                                            temperature_limit: None,
-                                            charge_current_ma,
-                                            discharge_current_ma: 0,
-                                        };
-                                        
-                                        slot.current_task = Some(task.clone());
-                                        slot.start_time = Some(Instant::now());
-                                        slot.state = SlotState::Charging;
-                                        self.slot_configs[slot_id.0] = Some(task);
+                // Collect idle slot indices first (can't borrow self.slots mutably in loop with self.connected_device)
+                let idle_slots: Vec<(usize, f32)> = self.slots.iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.is_idle() && s.current_voltage > 0.1)
+                    .map(|(i, s)| (i, s.current_voltage))
+                    .collect();
+                
+                if verbose {
+                    println!("[SIMPLE-AUTO] Found {} idle slots to start", idle_slots.len());
+                }
+                
+                // For each idle slot: send config, then start for that single slot
+                for (slot_idx, voltage) in &idle_slots {
+                    let slot_id = self.slots[*slot_idx].id;
+                    let chemistry = self.slots[*slot_idx].estimate_chemistry_from_voltage();
+                    
+                    if verbose {
+                        println!("[SIMPLE-AUTO] Slot {}: Detected chemistry: {:?} ({:.3}V)", 
+                            slot_id.0 + 1, chemistry, voltage);
+                    }
+                    
+                    let charge_current_ma = 500;
+                    let target_voltage = chemistry.target_voltage();
+                    let cutoff_voltage = chemistry.cutoff_voltage();
+                    
+                    let bt_chem = match chemistry {
+                        BatteryChemistry::LiIon => BtChemistry::LiIon,
+                        BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
+                        BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
+                        BatteryChemistry::NiMH => BtChemistry::NiMH,
+                        BatteryChemistry::NiCd => BtChemistry::NiCd,
+                        BatteryChemistry::Eneloop => BtChemistry::Eneloop,
+                        BatteryChemistry::NiZn => BtChemistry::NiZn,
+                        BatteryChemistry::RAM => BtChemistry::RAM,
+                        BatteryChemistry::LTO => BtChemistry::LTO,
+                        BatteryChemistry::NaIon => BtChemistry::NaIon,
+                    };
+                    
+                    let is_nickel = matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop);
+                    
+                    let config = ChargeConfig {
+                        channel_bitmask: 1 << slot_id.0,
+                        mode: OperationMode::Charge,
+                        chemistry: bt_chem,
+                        charge_current_ma,
+                        discharge_current_ma: 0,
+                        capacity_mah: 3000,
+                        target_voltage_mv: (target_voltage * 1000.0) as u16,
+                        cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
+                        charge_cutoff_current_ma: 100,
+                        discharge_cutoff_current_ma: 100,
+                        trickle_charge_ma: if is_nickel { 50 } else { 0 },
+                        keep_voltage_mv: if is_nickel { 1300 } else { 0 },
+                        delta_peak_mv: if is_nickel { 6 } else { 0 },
+                        cutoff_timer_min: if is_nickel { 90 } else { 0 },
+                        max_time_min: 300,
+                        cycle_direction: 0x00,
+                        charge_resting_min: 10,
+                        discharge_resting_min: 10,
+                        cycle_count: 1,
+                    };
+                    
+                    let mut slot_started = false;
+                    if let Some(ref mut device) = self.connected_device {
+                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                            let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
+                            
+                            match self.rt.block_on(proto.send_command(&cmd)) {
+                                Ok(_) => {
+                                    if verbose {
+                                        println!("[SIMPLE-AUTO] Slot {}: Config sent ({}mA)", 
+                                            slot_id.0 + 1, charge_current_ma);
                                     }
-                                    Err(e) => {
-                                        if verbose {
-                                            println!("[SIMPLE-AUTO] ✗ Slot {}: Failed to send config: {}", slot_id.0 + 1, e);
+                                    
+                                    // Add this slot's bit for single-slot start
+                                    let slot_mask: u8 = 1 << slot_id.0;
+                                    
+                                    // Wait for device to process config before start
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                    
+                                    // Send start for this single slot only
+                                    let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
+                                        mc5000_protocol::StartStopAction::ChannelMask(slot_mask)
+                                    );
+                                    
+                                    if verbose {
+                                        println!("[SIMPLE-AUTO] Slot {}: Sending start (mask 0x{:02X})", 
+                                            slot_id.0 + 1, slot_mask);
+                                    }
+                                    
+                                    match self.rt.block_on(proto.send_command(&start_cmd)) {
+                                        Ok(_) => {
+                                            if verbose {
+                                                println!("[SIMPLE-AUTO] Slot {}: ✓ Started", slot_id.0 + 1);
+                                            }
+                                            slot_started = true;
                                         }
+                                        Err(e) => {
+                                            if verbose {
+                                                println!("[SIMPLE-AUTO] Slot {}: ✗ Start failed: {}", slot_id.0 + 1, e);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Delay before next slot
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                }
+                                Err(e) => {
+                                    if verbose {
+                                        println!("[SIMPLE-AUTO] ✗ Slot {}: Failed to send config: {}", slot_id.0 + 1, e);
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-                
-                // Phase 2: Send ONE combined start command for all configured slots + already active
-                if start_mask != 0 {
-                    // Include already-active slots in the mask
-                    for (i, s) in self.slots.iter().enumerate() {
-                        if s.is_active() && (start_mask & (1 << i)) == 0 {
-                            start_mask |= 1 << i;
                         }
                     }
                     
-                    if let Some(ref mut device) = self.connected_device {
-                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                            let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
-                                mc5000_protocol::StartStopAction::ChannelMask(start_mask)
-                            );
-                            
-                            if verbose {
-                                println!("[SIMPLE-AUTO] Sending combined start command (mask 0x{:02X})", start_mask);
-                            }
-                            
-                            if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
-                                if verbose {
-                                    println!("[SIMPLE-AUTO] ✗ Failed to send start: {}", e);
-                                }
-                            } else if verbose {
-                                println!("[SIMPLE-AUTO] ✓ All slots started");
-                            }
-                        }
+                    if slot_started {
+                        let task = TaskConfig {
+                            task_type: TaskType::Charge,
+                            battery_chemistry: chemistry,
+                            target_voltage,
+                            target_current: charge_current_ma as f32 / 1000.0,
+                            cutoff_voltage: Some(cutoff_voltage),
+                            capacity_limit: None,
+                            time_limit: None,
+                            temperature_limit: None,
+                            charge_current_ma,
+                            discharge_current_ma: 0,
+                        };
+                        
+                        self.slots[*slot_idx].current_task = Some(task.clone());
+                        self.slots[*slot_idx].start_time = Some(Instant::now());
+                        self.slots[*slot_idx].state = SlotState::Charging;
+                        self.slot_configs[slot_id.0] = Some(task);
                     }
                 }
                 
@@ -1497,147 +1627,144 @@ impl ChargerApp {
                 if verbose {
                     println!("[AUTO-CHARGE] Starting auto-charge for all idle slots...");
                 }
-                
-                // Init sequence required before config commands
-                if let Some(ref mut device) = self.connected_device {
-                    if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                        if let Err(e) = self.rt.block_on(proto.send_init_sequence()) {
-                            log::error!("Failed to send init sequence: {}", e);
-                        }
-                    }
-                }
 
-                // Phase 1: Send config for each idle slot with a battery
-                let mut start_mask: u8 = 0;
-                for slot in &mut self.slots {
-                    if slot.is_idle() && slot.current_voltage > 0.1 {
-                        let slot_id = slot.id;
-                        let voltage = slot.current_voltage;
-                        
-                        // Auto-detect chemistry from voltage
-                        let chemistry = slot.estimate_chemistry_from_voltage();
-                        
-                        if verbose {
-                            println!("[AUTO-CHARGE] Slot {}: Detected chemistry: {:?} ({:.3}V)", 
-                                slot_id.0 + 1, chemistry, voltage);
-                        }
-                        
-                        // Start at 500mA — enough for device to measure resistance.
-                        // Will be adjusted based on resistance reading later.
-                        let initial_current_ma = 500;
-                        
-                        // Create charge configuration using chemistry defaults
-                        let target_voltage = chemistry.target_voltage();
-                        let cutoff_voltage = chemistry.cutoff_voltage();
-                        
-                        let bt_chem = match chemistry {
-                            BatteryChemistry::LiIon => BtChemistry::LiIon,
-                            BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
-                            BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
-                            BatteryChemistry::NiMH => BtChemistry::NiMH,
-                            BatteryChemistry::NiCd => BtChemistry::NiCd,
-                            BatteryChemistry::Eneloop => BtChemistry::Eneloop,
-                            BatteryChemistry::NiZn => BtChemistry::NiZn,
-                            BatteryChemistry::RAM => BtChemistry::RAM,
-                            BatteryChemistry::LTO => BtChemistry::LTO,
-                            BatteryChemistry::NaIon => BtChemistry::NaIon,
-                        };
-                        let config = ChargeConfig {
-                            channel_bitmask: 1 << slot_id.0,
-                            mode: OperationMode::Charge,
-                            chemistry: bt_chem,
-                            charge_current_ma: initial_current_ma,
-                            discharge_current_ma: 0,
-                            capacity_mah: 3000,
-                            target_voltage_mv: (target_voltage * 1000.0) as u16,
-                            cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
-                            charge_cutoff_current_ma: 100,
-                            discharge_cutoff_current_ma: 100,
-                            trickle_charge_ma: if matches!(chemistry, BatteryChemistry::NiCd) { 50 } else { 0 },
-                            keep_voltage_mv: 0,
-                            delta_peak_mv: if matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop) { 6 } else { 0 },
-                            cutoff_timer_min: 0,
-                            max_time_min: 300,
-                            cycle_direction: 0x00,
-                            charge_resting_min: 10,
-                            discharge_resting_min: 10,
-                            cycle_count: 1,
-                        };
-                        
-                        if let Some(ref mut device) = self.connected_device {
-                            if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                                let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
-                                
-                                match self.rt.block_on(proto.send_command(&cmd)) {
-                                    Ok(_) => {
-                                        if verbose {
-                                            println!("[AUTO-CHARGE] Slot {}: Config sent ({}mA)", 
-                                                slot_id.0 + 1, initial_current_ma);
-                                        }
-                                        
-                                        start_mask |= 1 << slot_id.0;
-                                        
-                                        // Create task config
-                                        let task = TaskConfig {
-                                            task_type: TaskType::Charge,
-                                            battery_chemistry: chemistry,
-                                            target_voltage,
-                                            target_current: initial_current_ma as f32 / 1000.0,
-                                            cutoff_voltage: Some(cutoff_voltage),
-                                            capacity_limit: Some(3000),
-                                            time_limit: None,
-                                            temperature_limit: None,
-                                            charge_current_ma: initial_current_ma,
-                                            discharge_current_ma: 0,
-                                        };
-                                        
-                                        slot.current_task = Some(task);
-                                        slot.start_time = Some(Instant::now());
-                                        slot.state = SlotState::Charging;
-                                        
-                                        // Add to auto-charge pending list for resistance-based adjustment
-                                        self.auto_charge_pending.push(slot_id);
+                // Collect idle slot indices first
+                let idle_slots: Vec<(usize, f32)> = self.slots.iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.is_idle() && s.current_voltage > 0.1)
+                    .map(|(i, s)| (i, s.current_voltage))
+                    .collect();
+                
+                if verbose {
+                    println!("[AUTO-CHARGE] Found {} idle slots to start", idle_slots.len());
+                }
+                
+                // For each idle slot: send config, then start for that single slot
+                for (slot_idx, voltage) in &idle_slots {
+                    let slot_id = self.slots[*slot_idx].id;
+                    let chemistry = self.slots[*slot_idx].estimate_chemistry_from_voltage();
+                    
+                    if verbose {
+                        println!("[AUTO-CHARGE] Slot {}: Detected chemistry: {:?} ({:.3}V)", 
+                            slot_id.0 + 1, chemistry, voltage);
+                    }
+                    
+                    let initial_current_ma = 500;
+                    let target_voltage = chemistry.target_voltage();
+                    let cutoff_voltage = chemistry.cutoff_voltage();
+                    
+                    let bt_chem = match chemistry {
+                        BatteryChemistry::LiIon => BtChemistry::LiIon,
+                        BatteryChemistry::LiIonHV => BtChemistry::LiIonHV,
+                        BatteryChemistry::LiFePO4 => BtChemistry::LiFePO4,
+                        BatteryChemistry::NiMH => BtChemistry::NiMH,
+                        BatteryChemistry::NiCd => BtChemistry::NiCd,
+                        BatteryChemistry::Eneloop => BtChemistry::Eneloop,
+                        BatteryChemistry::NiZn => BtChemistry::NiZn,
+                        BatteryChemistry::RAM => BtChemistry::RAM,
+                        BatteryChemistry::LTO => BtChemistry::LTO,
+                        BatteryChemistry::NaIon => BtChemistry::NaIon,
+                    };
+                    
+                    let is_nickel = matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop);
+                    
+                    let config = ChargeConfig {
+                        channel_bitmask: 1 << slot_id.0,
+                        mode: OperationMode::Charge,
+                        chemistry: bt_chem,
+                        charge_current_ma: initial_current_ma,
+                        discharge_current_ma: 0,
+                        capacity_mah: 3000,
+                        target_voltage_mv: (target_voltage * 1000.0) as u16,
+                        cutoff_voltage_mv: (cutoff_voltage * 1000.0) as u16,
+                        charge_cutoff_current_ma: 100,
+                        discharge_cutoff_current_ma: 100,
+                        trickle_charge_ma: if is_nickel { 50 } else { 0 },
+                        keep_voltage_mv: if is_nickel { 1300 } else { 0 },
+                        delta_peak_mv: if is_nickel { 6 } else { 0 },
+                        cutoff_timer_min: if is_nickel { 90 } else { 0 },
+                        max_time_min: 300,
+                        cycle_direction: 0x00,
+                        charge_resting_min: 10,
+                        discharge_resting_min: 10,
+                        cycle_count: 1,
+                    };
+                    
+                    let mut slot_started = false;
+                    if let Some(ref mut device) = self.connected_device {
+                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
+                            let cmd = mc5000_protocol::MC5000Protocol::build_charge_config_command(&config);
+                            
+                            match self.rt.block_on(proto.send_command(&cmd)) {
+                                Ok(_) => {
+                                    if verbose {
+                                        println!("[AUTO-CHARGE] Slot {}: Config sent ({}mA)", 
+                                            slot_id.0 + 1, initial_current_ma);
                                     }
-                                    Err(e) => {
-                                        if verbose {
-                                            println!("[AUTO-CHARGE] ✗ Slot {}: Failed to send config: {}", 
-                                                slot_id.0 + 1, e);
-                                        }
-                                        log::error!("Auto-charge failed for slot {}: {}", slot_id.0 + 1, e);
+                                    
+                                    // Single-slot start
+                                    let slot_mask: u8 = 1 << slot_id.0;
+                                    
+                                    // Wait for device to process config before start
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                    
+                                    // Send start for this single slot only
+                                    let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
+                                        mc5000_protocol::StartStopAction::ChannelMask(slot_mask)
+                                    );
+                                    
+                                    if verbose {
+                                        println!("[AUTO-CHARGE] Slot {}: Sending start (mask 0x{:02X})", 
+                                            slot_id.0 + 1, slot_mask);
                                     }
+                                    
+                                    match self.rt.block_on(proto.send_command(&start_cmd)) {
+                                        Ok(_) => {
+                                            if verbose {
+                                                println!("[AUTO-CHARGE] Slot {}: ✓ Started", slot_id.0 + 1);
+                                            }
+                                            slot_started = true;
+                                        }
+                                        Err(e) => {
+                                            if verbose {
+                                                println!("[AUTO-CHARGE] Slot {}: ✗ Start failed: {}", slot_id.0 + 1, e);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Delay before next slot
+                                    self.rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+                                }
+                                Err(e) => {
+                                    if verbose {
+                                        println!("[AUTO-CHARGE] ✗ Slot {}: Failed to send config: {}", 
+                                            slot_id.0 + 1, e);
+                                    }
+                                    log::error!("Auto-charge failed for slot {}: {}", slot_id.0 + 1, e);
                                 }
                             }
-                        }
-                    }
-                }
-                
-                // Phase 2: Send ONE combined start command for all configured slots + already active
-                if start_mask != 0 {
-                    // Include already-active slots in the mask
-                    for (i, s) in self.slots.iter().enumerate() {
-                        if s.is_active() && (start_mask & (1 << i)) == 0 {
-                            start_mask |= 1 << i;
                         }
                     }
                     
-                    if let Some(ref mut device) = self.connected_device {
-                        if let Some(proto) = device.bluetooth_protocol.as_mut() {
-                            let start_cmd = mc5000_protocol::MC5000Protocol::build_start_stop_command(
-                                mc5000_protocol::StartStopAction::ChannelMask(start_mask)
-                            );
-                            
-                            if verbose {
-                                println!("[AUTO-CHARGE] Sending combined start command (mask 0x{:02X})", start_mask);
-                            }
-                            
-                            if let Err(e) = self.rt.block_on(proto.send_command(&start_cmd)) {
-                                if verbose {
-                                    println!("[AUTO-CHARGE] ✗ Failed to send start: {}", e);
-                                }
-                            } else if verbose {
-                                println!("[AUTO-CHARGE] ✓ All slots started");
-                            }
-                        }
+                    if slot_started {
+                        let task = TaskConfig {
+                            task_type: TaskType::Charge,
+                            battery_chemistry: chemistry,
+                            target_voltage,
+                            target_current: initial_current_ma as f32 / 1000.0,
+                            cutoff_voltage: Some(cutoff_voltage),
+                            capacity_limit: Some(3000),
+                            time_limit: None,
+                            temperature_limit: None,
+                            charge_current_ma: initial_current_ma,
+                            discharge_current_ma: 0,
+                        };
+                        
+                        self.slots[*slot_idx].current_task = Some(task.clone());
+                        self.slots[*slot_idx].start_time = Some(Instant::now());
+                        self.slots[*slot_idx].state = SlotState::Charging;
+                        self.slot_configs[slot_id.0] = Some(task);
+                        self.auto_charge_pending.push(slot_id);
                     }
                 }
                 
@@ -1773,6 +1900,71 @@ impl ChargerApp {
                 let _ = open::that("https://github.com/rssdev10/skyrc-mc-rs");
                 Task::none()
             }
+
+            AppMessage::CliCommand(cmd) => {
+                use std::io::Write;
+                println!("[CLI DEBUG] Received command: '{}'", cmd);
+                let _ = std::io::stdout().flush();
+                
+                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                match parts.first().copied() {
+                    Some("auto") => {
+                        println!("[CLI DEBUG] Triggering SimpleAutoCharge");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::SimpleAutoCharge);
+                    }
+                    Some("smart") => {
+                        println!("[CLI DEBUG] Triggering SmartChargeAll");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::SmartChargeAll);
+                    }
+                    Some("stop") => {
+                        println!("[CLI DEBUG] Triggering StopAllSlots");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::StopAllSlots);
+                    }
+                    Some("status") => {
+                        println!("[CLI DEBUG] Slot status:");
+                        for (i, slot) in self.slots.iter().enumerate() {
+                            println!("  Slot {}: state={:?}, voltage={:.3}V, current={:.0}mA, resistance={}mΩ",
+                                i + 1, slot.state, slot.current_voltage, slot.current_current, slot.resistance_milliohm);
+                        }
+                        let _ = std::io::stdout().flush();
+                    }
+                    Some("connect") => {
+                        println!("[CLI DEBUG] Triggering ConnectDevice");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::ConnectDevice);
+                    }
+                    Some("disconnect") => {
+                        println!("[CLI DEBUG] Triggering DisconnectDevice");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::DisconnectDevice);
+                    }
+                    Some("scan") => {
+                        println!("[CLI DEBUG] Triggering RefreshDevices");
+                        let _ = std::io::stdout().flush();
+                        return self.update(AppMessage::RefreshDevices);
+                    }
+                    Some("help") => {
+                        println!("[CLI DEBUG] Available commands:");
+                        println!("  auto        - Trigger Auto (500mA) charge on idle slots");
+                        println!("  smart       - Trigger SmartCharge on idle slots");
+                        println!("  stop        - Stop all slots");
+                        println!("  status      - Show current slot status");
+                        println!("  connect     - Connect to selected device");
+                        println!("  disconnect  - Disconnect from device");
+                        println!("  scan        - Scan for devices");
+                        println!("  help        - Show this help");
+                        let _ = std::io::stdout().flush();
+                    }
+                    _ => {
+                        println!("[CLI DEBUG] Unknown command: '{}'. Type 'help' for available commands.", cmd);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                Task::none()
+            }
         }
     }
 
@@ -1833,7 +2025,17 @@ impl ChargerApp {
             Subscription::none()
         };
         
-        Subscription::batch([tick, notifications])
+        // CLI debug input subscription (only in verbose debug builds)
+        #[cfg(debug_assertions)]
+        let cli_input = if std::env::var("MC5000_VERBOSE").is_ok() {
+            Subscription::run(cli_debug_stream)
+        } else {
+            Subscription::none()
+        };
+        #[cfg(not(debug_assertions))]
+        let cli_input = Subscription::none();
+        
+        Subscription::batch([tick, notifications, cli_input])
     }
 
     pub fn theme(&self) -> Theme {

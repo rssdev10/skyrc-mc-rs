@@ -237,11 +237,11 @@ impl DeviceManager {
             println!("[DEVICE VERBOSE] Creating protocol and connecting...");
         }
 
-        // Create protocol and connect
+        // Create protocol and connect with full init sequence.
+        // The init sequence (0x74, 0x65, 0xFE) MUST be sent after handshake
+        // for the device to accept start/stop commands (0x93).
         let mut protocol = MC5000Protocol::new();
-        // Connect without init sequence to avoid disrupting running operations.
-        // Init sequence will be sent on-demand before control commands.
-        protocol.connect_without_init(&bt_device.peripheral).await?;
+        protocol.connect(&bt_device.peripheral).await?;
         
         if verbose {
             println!("[DEVICE VERBOSE] Verifying connection...");
