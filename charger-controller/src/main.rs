@@ -14,6 +14,7 @@ mod config_dialog;
 mod settings;
 mod i18n;
 mod profiles;
+mod slot_persist;
 
 use app::ChargerApp;
 

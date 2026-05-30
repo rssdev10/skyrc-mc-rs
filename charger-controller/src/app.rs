@@ -120,6 +120,7 @@ pub struct ChargerApp {
     config_dialog_state: Option<crate::ui::components::config_dialog::ConfigDialogState>,
     pending_slot: Option<SlotId>,
     saved_slot_configs: [Option<crate::ui::components::config_dialog::ConfigDialogState>; 4],  // Persist config per slot
+    slot_config_store: crate::slot_persist::SlotConfigStore,  // Disk-persisted per-slot configs
     auto_charge_pending: Vec<SlotId>,  // Slots waiting for resistance measurement in auto-charge mode
     show_detailed_stats: bool,  // Toggle for detailed per-slot sample stream
     settings: crate::settings::Settings,
@@ -260,6 +261,23 @@ impl ChargerApp {
             println!("[APP VERBOSE] Creating device manager and initializing slots...");
         }
         
+        let profile_store = crate::profiles::ProfileStore::load();
+        let slot_config_store = crate::slot_persist::SlotConfigStore::load();
+
+        // Reconstruct saved dialog states from persisted disk configs
+        let saved_slot_configs = {
+            use crate::ui::components::config_dialog::ConfigDialogState;
+            let mut arr: [Option<ConfigDialogState>; 4] = [None, None, None, None];
+            for (i, slot_arr) in arr.iter_mut().enumerate() {
+                if let Some(persisted) = slot_config_store.get(i) {
+                    let mut state = ConfigDialogState::from_persisted(persisted);
+                    state.resolve_profile(&profile_store);
+                    *slot_arr = Some(state);
+                }
+            }
+            arr
+        };
+
         let app = ChargerApp {
             device_manager: DeviceManager::new(),
             connected_device: None,
@@ -282,12 +300,13 @@ impl ChargerApp {
             selected_slot: Some(0),  // Default to first slot selected
             config_dialog_state: None,
             pending_slot: None,
-            saved_slot_configs: [None, None, None, None],
+            saved_slot_configs,
             auto_charge_pending: Vec::new(),
             show_detailed_stats: false,  // Default: hide detailed per-slot stream
             settings,
             show_settings: false,
-            profile_store: crate::profiles::ProfileStore::load(),
+            profile_store,
+            slot_config_store,
         };
 
         if verbose {
@@ -1046,11 +1065,13 @@ impl ChargerApp {
             AppMessage::ShowConfigDialog(slot_index, voltage) => {
                 self.pending_slot = Some(slot_index);
                 // Restore saved config for this slot, or create a new one
-                let state = if let Some(saved) = self.saved_slot_configs[slot_index.0].clone() {
+                let mut state = if let Some(saved) = self.saved_slot_configs[slot_index.0].clone() {
                     saved
                 } else {
                     crate::ui::components::config_dialog::ConfigDialogState::new(voltage)
                 };
+                // Re-resolve selected_profile index from last_profile_name (in case profile list changed)
+                state.resolve_profile(&self.profile_store);
                 self.config_dialog_state = Some(state);
                 Task::none()
             }
@@ -1282,9 +1303,10 @@ impl ChargerApp {
             AppMessage::ConfigSelectProfile(idx) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.selected_profile = Some(idx);
-                    // Apply profile to dialog
+                    // Apply profile to dialog and remember its name for persistence
                     if let Some(profile) = self.profile_store.profiles.get(idx) {
                         state.apply_profile(profile);
+                        state.last_profile_name = Some(profile.name.clone());
                         state.config_modified = false;
                     }
                 }
@@ -1356,6 +1378,15 @@ impl ChargerApp {
                     let mode = state.mode;
                     
                     // Save config for this slot, then close dialog
+                    // Persist to disk so it survives app restarts
+                    let persisted = crate::slot_persist::PersistedSlotConfig {
+                        chemistry: state.chemistry,
+                        mode: state.mode,
+                        config: state.get_config(),
+                        last_profile_name: state.last_profile_name.clone(),
+                    };
+                    self.slot_config_store.set(slot_id.0, Some(persisted));
+                    self.slot_config_store.save();
                     self.saved_slot_configs[slot_id.0] = Some(state.clone());
                     self.config_dialog_state = None;
                     self.pending_slot = None;

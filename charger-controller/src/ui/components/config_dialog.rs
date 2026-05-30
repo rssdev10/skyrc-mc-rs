@@ -35,6 +35,8 @@ pub struct ConfigDialogState {
     pub selected_profile: Option<usize>,
     pub config_modified: bool, // Track if config was changed since profile was applied
     pub deleted_profile: Option<crate::profiles::Profile>, // For undo support
+    /// Name of the last applied profile (persisted across sessions, resolved to index on open)
+    pub last_profile_name: Option<String>,
 }
 
 impl ConfigDialogState {
@@ -84,6 +86,48 @@ impl ConfigDialogState {
             selected_profile: None,
             config_modified: false,
             deleted_profile: None,
+            last_profile_name: None,
+        }
+    }
+
+    /// Reconstruct dialog state from a persisted slot config.
+    /// `selected_profile` is left `None`; call `resolve_profile` afterwards.
+    pub fn from_persisted(p: &crate::slot_persist::PersistedSlotConfig) -> Self {
+        Self {
+            chemistry: p.chemistry,
+            mode: p.mode,
+            capacity_input: p.config.capacity_mah.to_string(),
+            charge_current_input: p.config.charge_current_ma.to_string(),
+            discharge_current_input: p.config.discharge_current_ma.to_string(),
+            target_voltage_input: format!("{:.2}", p.config.target_voltage_mv as f32 / 1000.0),
+            cutoff_voltage_input: format!("{:.2}", p.config.cutoff_voltage_mv as f32 / 1000.0),
+            storage_voltage_input: p.config.storage_voltage_mv
+                .map(|v| format!("{:.2}", v as f32 / 1000.0))
+                .unwrap_or_default(),
+            delta_peak_input: p.config.delta_peak_mv.to_string(),
+            trickle_charge_input: p.config.trickle_charge_ma.to_string(),
+            cutoff_timer_input: p.config.cutoff_timer_min.to_string(),
+            charge_cutoff_current_input: p.config.charge_cutoff_current_ma.to_string(),
+            discharge_cutoff_current_input: p.config.discharge_cutoff_current_ma.to_string(),
+            charge_resting_input: p.config.charge_resting_min.to_string(),
+            discharge_resting_input: p.config.discharge_resting_min.to_string(),
+            cycle_count_input: p.config.cycle_count.to_string(),
+            config: p.config.clone(),
+            profile_name_input: p.last_profile_name.clone().unwrap_or_default(),
+            selected_profile: None,
+            config_modified: false,
+            deleted_profile: None,
+            last_profile_name: p.last_profile_name.clone(),
+        }
+    }
+
+    /// Look up `last_profile_name` in the profile store and set `selected_profile` to
+    /// the matching index. Called when the dialog is opened to re-highlight the last profile.
+    pub fn resolve_profile(&mut self, profile_store: &crate::profiles::ProfileStore) {
+        if let Some(ref name) = self.last_profile_name.clone() {
+            self.selected_profile = profile_store.profiles.iter().position(|p| &p.name == name);
+        } else {
+            self.selected_profile = None;
         }
     }
 
