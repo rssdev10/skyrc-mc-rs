@@ -61,7 +61,7 @@ impl ProfileStore {
 
     pub fn sorted_profiles(&self) -> Vec<(usize, &Profile)> {
         let mut indexed: Vec<(usize, &Profile)> = self.profiles.iter().enumerate().collect();
-        indexed.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        indexed.sort_by_key(|a| a.1.name.to_lowercase());
         indexed
     }
 

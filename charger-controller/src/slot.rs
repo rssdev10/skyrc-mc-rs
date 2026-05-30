@@ -335,10 +335,8 @@ impl Slot {
                         completed = true;
                     }
                 }
-                TaskType::Discharge => {
-                    if self.current_voltage <= cutoff_voltage {
-                        completed = true;
-                    }
+                TaskType::Discharge if self.current_voltage <= cutoff_voltage => {
+                    completed = true;
                 }
                 _ => {}
             }
