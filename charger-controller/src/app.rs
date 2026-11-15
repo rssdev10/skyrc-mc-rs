@@ -545,8 +545,8 @@ impl ChargerApp {
                                 
                                 // Compute combined active mask
                                 let mut active_mask: u8 = 0;
-                                for i in 0..4 {
-                                    if self.slots[i].is_active() {
+                                for (i, slot) in self.slots.iter().enumerate() {
+                                    if slot.is_active() {
                                         active_mask |= 1 << i;
                                     }
                                 }
@@ -2175,9 +2175,9 @@ mod tests {
     fn test_toggle_detailed_stats() {
         let mut app = create_test_app();
         assert!(!app.show_detailed_stats);
-        app.update(AppMessage::ToggleDetailedStats);
+        let _ = app.update(AppMessage::ToggleDetailedStats);
         assert!(app.show_detailed_stats);
-        app.update(AppMessage::ToggleDetailedStats);
+        let _ = app.update(AppMessage::ToggleDetailedStats);
         assert!(!app.show_detailed_stats);
     }
 
@@ -2185,14 +2185,14 @@ mod tests {
     fn test_slot_selected() {
         let mut app = create_test_app();
         assert_eq!(app.selected_slot, Some(0)); // default
-        app.update(AppMessage::SlotSelected(2));
+        let _ = app.update(AppMessage::SlotSelected(2));
         assert_eq!(app.selected_slot, Some(2));
     }
 
     #[test]
     fn test_device_selected() {
         let mut app = create_test_app();
-        app.update(AppMessage::DeviceSelected("test-device".to_string()));
+        let _ = app.update(AppMessage::DeviceSelected("test-device".to_string()));
         assert_eq!(app.selected_device, Some("test-device".to_string()));
     }
 
@@ -2201,7 +2201,7 @@ mod tests {
         let mut app = create_test_app();
         app.scanning = true;
         let devices = vec!["device1".to_string(), "device2".to_string()];
-        app.update(AppMessage::BluetoothScanComplete(Ok(devices)));
+        let _ = app.update(AppMessage::BluetoothScanComplete(Ok(devices)));
         assert!(!app.scanning);
     }
 
@@ -2209,7 +2209,7 @@ mod tests {
     fn test_bluetooth_scan_complete_error() {
         let mut app = create_test_app();
         assert!(app.scanning);
-        app.update(AppMessage::BluetoothScanComplete(Err("scan failed".to_string())));
+        let _ = app.update(AppMessage::BluetoothScanComplete(Err("scan failed".to_string())));
         assert!(!app.scanning);
         // Error is logged but connection status stays disconnected
         assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
@@ -2222,7 +2222,7 @@ mod tests {
             crate::ui::components::config_dialog::ConfigDialogState::new(3.7),
         );
         app.pending_slot = Some(SlotId(0));
-        app.update(AppMessage::ConfigDialogCancel);
+        let _ = app.update(AppMessage::ConfigDialogCancel);
         assert!(app.config_dialog_state.is_none());
     }
 
@@ -2230,9 +2230,9 @@ mod tests {
     fn test_notification_received_invalid_data() {
         let mut app = create_test_app();
         // Too short - should be ignored
-        app.update(AppMessage::NotificationReceived(vec![0x01, 0x02]));
+        let _ = app.update(AppMessage::NotificationReceived(vec![0x01, 0x02]));
         // Wrong header - should be ignored
-        app.update(AppMessage::NotificationReceived(vec![0xFF; 23]));
+        let _ = app.update(AppMessage::NotificationReceived(vec![0xFF; 23]));
         // All slots should remain idle
         for slot in &app.slots {
             assert_eq!(slot.state, SlotState::Idle);
@@ -2248,7 +2248,7 @@ mod tests {
         // Pad to 23 bytes
         data.resize(23, 0x00);
         // Set state byte (byte index varies by parser, but let's exercise the path)
-        app.update(AppMessage::NotificationReceived(data));
+        let _ = app.update(AppMessage::NotificationReceived(data));
         // The parser may or may not succeed with zeroed data, 
         // but the app should not panic
     }
@@ -2257,13 +2257,13 @@ mod tests {
     fn test_tick_does_not_panic_when_disconnected() {
         let mut app = create_test_app();
         // Tick should not panic when no device is connected
-        app.update(AppMessage::Tick);
+        let _ = app.update(AppMessage::Tick);
     }
 
     #[test]
     fn test_clear_data() {
         let mut app = create_test_app();
-        app.update(AppMessage::ClearData);
+        let _ = app.update(AppMessage::ClearData);
         // Should not panic; data logger should be cleared
     }
 

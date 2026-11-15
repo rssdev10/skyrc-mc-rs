@@ -82,8 +82,8 @@ impl TimeAlignedCsvFormat {
         ];
         
         // Add data for each of the 4 slots (current_mA, voltage_V, state, mode, resistance_mOhm, elapsed_time_sec)
-        for slot_idx in 0..4 {
-            if let Some(data) = &row.slots[slot_idx] {
+        for slot in &row.slots {
+            if let Some(data) = slot {
                 record.push(format!("{:.1}", data.current)); // current in mA
                 record.push(format!("{:.3}", data.voltage));
                 record.push(data.state.clone());

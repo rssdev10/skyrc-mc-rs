@@ -176,21 +176,81 @@ charger-cli auto
 
 ### Dependencies
 
-- Rust 1.70+
-- btleplug (Bluetooth)
-- iced 0.12 (GUI)
-- clap 4.5 (CLI)
+- Rust stable, edition 2021 (CI uses the latest stable toolchain)
+- btleplug 0.13 (Bluetooth LE)
+- iced 0.14 (GUI, function-based application API, `tokio` feature)
+- clap 4 (CLI)
 - tokio (async runtime)
+- Linux builds need the system packages listed in `.github/workflows/tests.yml`
+  (`libdbus-1-dev`, `libudev-dev`, X11/Wayland and font headers)
 
-### Testing
+### Architecture
+
+| Crate | Path | Responsibility |
+|-------|------|----------------|
+| `mc5000-protocol` | `mc5000-protocol/src/` | BLE transport (`bluetooth.rs`: scan, connect, write, notifications), packet builders, checksum, response parsers, `BatteryChemistry`, `OperationMode`, `ChargeConfig`; device discovery and connection management (`device.rs`). The only crate that knows the wire format. |
+| `charger-controller` | `charger-controller/src/` | iced GUI. `app.rs` is the state machine (`ChargerApp`, `AppMessage`, `update`, `subscription`); `ui/` holds views; `slot.rs`, `data.rs`, `export.rs` hold slot state, sample logging and CSV export; `settings.rs`, `profiles.rs`, `slot_persist.rs` persist user data via `confy`; `i18n.rs` plus `locales/*.json` provide translations. `main.rs` also exposes a few headless subcommands. |
+| `charger-controller-cli` | `charger-controller-cli/src/main.rs` | `charger-cli` binary (clap). One async function per subcommand. |
+
+Rules that follow from this split:
+
+- Wire-format knowledge (command bytes, offsets, scaling, checksums, chemistry and mode bytes) lives
+  only in `mc5000-protocol`. The GUI and CLI use its builders and parsers and never hand-assemble
+  packets.
+- Reuse the existing enums and helpers (`BatteryChemistry`, `OperationMode`, `ChargeConfig`
+  builders) instead of duplicating logic.
+- Keep the public API of `mc5000-protocol` stable unless a breaking change is intended.
+
+### Concurrency model
+
+- **Protocol crate**: async (tokio). `MC5000Protocol` is `Clone` and wraps a btleplug
+  `Peripheral`; clones share the same BLE connection. Notifications arrive on a stream that is
+  consumed by a separate task from the one sending commands.
+- **GUI**: iced runs `update()` and `view()` on the UI thread. BLE notifications enter through
+  `ChargerApp::subscription()` as `AppMessage::NotificationReceived`. Long-running or awaiting work
+  should be returned as `Task::perform(...)`. `ChargerApp` also owns a private tokio `Runtime`
+  used with `block_on` for short command sequences; every `block_on` freezes the UI for its
+  duration.
+- **CLI**: a tokio runtime with a spawned notification task that writes into
+  `Arc<Mutex<HashMap<u8, MC5000SlotStatus>>>`, read by the main task; Ctrl-C is signalled through
+  an `AtomicBool`.
+
+### Documentation map
+
+- `docs/PROTOCOL.md` – authoritative BLE protocol reference. Update it together with any change to
+  packet encoding or decoding.
+- `modes.md` – operation modes and their parameters per chemistry.
+- `docs/GUI_DESIGN.md` – GUI architecture, messages and layout. Update it whenever the GUI changes.
+- `packaging/README.md` – release packaging layout.
+- When README or docs show CLI usage, the argument names must match `charger-controller-cli`
+  exactly.
+
+### Testing and linting
 
 ```bash
-# Run tests
-cargo test
-
-# Run with verbose output
-MC5000_VERBOSE=1 cargo run -p charger-controller
+cargo build --workspace
+cargo test --workspace                                        # unit tests
+cargo clippy --workspace --all-targets -- -D warnings         # lint (must be warning-free)
 ```
+
+- Unit tests live next to the code in each crate (`#[cfg(test)] mod tests`). GUI state-machine
+  tests are in `charger-controller/src/app.rs`.
+- Tests must not need a Bluetooth adapter or a charger: CI runs on a headless Linux runner. Build
+  packets and feed recorded or synthetic byte arrays to the parsers instead.
+- Hardware checks are manual: run the CLI (`charger-cli status`, `charger-cli monitor`,
+  `charger-cli debug`) or the GUI against a real MC5000.
+
+### Diagnostics
+
+```bash
+MC5000_VERBOSE=1 cargo run -p charger-controller   # verbose logging
+MC5000_DEBUG=1   cargo run -p charger-controller   # raw packet dumps (implies verbose)
+```
+
+### Continuous integration
+
+- `.github/workflows/tests.yml` – build, test and clippy on every pull request and on pushes to `main`.
+- `.github/workflows/release.yml` – release packaging (see below).
 
 ### Release Automation
 

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "charger-controller"
@@ -24,14 +25,14 @@ clap = { workspace = true }
 
 # GUI dependencies
 iced = { version = "0.14", features = ["tokio", "canvas", "advanced"] }
-rfd = "0.14"
+rfd = "0.18"
 image = "0.25"
 env_logger = "0.11"
 
 # Settings persistence
 confy = "0.6"
 open = "5"
-rust-i18n = "3"
+rust-i18n = "4"
 sys-locale = "0.3"
 
 # Data export
