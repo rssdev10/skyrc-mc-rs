@@ -1,12 +1,10 @@
 //! Per-slot config persistence across app restarts.
-//! Stored in the platform config dir via `confy`, key `"slot_configs"`.
-//! On macOS: `~/Library/Application Support/mc5000/slot_configs.toml`
+//! Stored as `slot_configs.toml`; see `config_store` for the folder.
 
 use serde::{Deserialize, Serialize};
 use crate::config_dialog::{ChargeConfig, ChargeMode};
 use crate::slot::BatteryChemistry;
 
-const APP: &str = "mc5000";
 const CFG: &str = "slot_configs";
 
 /// Minimal persisted state for one slot's configure-and-start dialog.
@@ -31,11 +29,11 @@ pub struct SlotConfigStore {
 
 impl SlotConfigStore {
     pub fn load() -> Self {
-        confy::load(APP, CFG).unwrap_or_default()
+        crate::config_store::load(CFG)
     }
 
     pub fn save(&self) {
-        let _ = confy::store(APP, CFG, self);
+        let _ = crate::config_store::store(CFG, self);
     }
 
     pub fn get(&self, slot: usize) -> Option<&PersistedSlotConfig> {

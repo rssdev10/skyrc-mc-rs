@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use crate::config_dialog::{ChargeConfig, ChargeMode};
 use crate::slot::BatteryChemistry;
 
-const APP: &str = "mc5000";
 const CFG: &str = "profiles";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,11 +51,11 @@ pub struct ProfileStore {
 
 impl ProfileStore {
     pub fn load() -> Self {
-        confy::load(APP, CFG).unwrap_or_default()
+        crate::config_store::load(CFG)
     }
 
     pub fn save(&self) -> Result<(), confy::ConfyError> {
-        confy::store(APP, CFG, self)
+        crate::config_store::store(CFG, self)
     }
 
     pub fn sorted_profiles(&self) -> Vec<(usize, &Profile)> {

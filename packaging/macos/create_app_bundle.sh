@@ -11,6 +11,7 @@ BUILD_PROFILE="debug"
 APP_NAME="MC5000 Charger"
 BUNDLE_NAME="MC5000Charger.app"
 DMG_NAME="MC5000Charger.dmg"
+# Also names the settings folder: keep in sync with MACOS_BUNDLE_ID in charger-controller/src/config_store.rs
 IDENTIFIER="com.mc5000.charger"
 VERSION="0.1.0"
 ASSETS_DIR="$SCRIPT_DIR"

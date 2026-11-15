@@ -15,6 +15,7 @@ mod settings;
 mod i18n;
 mod profiles;
 mod slot_persist;
+mod config_store;
 
 use app::ChargerApp;
 

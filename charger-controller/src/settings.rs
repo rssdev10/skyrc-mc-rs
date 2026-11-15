@@ -1,10 +1,7 @@
-//! Persistent settings stored under the platform's standard config dir
-//! (`confy` chooses: macOS → `~/Library/Application Support/mc5000/`,
-//! Linux → `~/.config/mc5000/`, Windows → `%APPDATA%\mc5000\`).
+//! Persistent settings. See `config_store` for where the file lives.
 
 use serde::{Deserialize, Serialize};
 
-const APP: &str = "mc5000";
 const CFG: &str = "settings";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,9 +39,9 @@ impl Default for Settings {
 }
 
 pub fn load() -> Settings {
-    confy::load(APP, CFG).unwrap_or_default()
+    crate::config_store::load(CFG)
 }
 
 pub fn save(s: &Settings) -> Result<(), confy::ConfyError> {
-    confy::store(APP, CFG, s)
+    crate::config_store::store(CFG, s)
 }

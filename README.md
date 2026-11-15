@@ -247,6 +247,15 @@ MC5000_VERBOSE=1 cargo run -p charger-controller   # verbose logging
 MC5000_DEBUG=1   cargo run -p charger-controller   # raw packet dumps (implies verbose)
 ```
 
+The GUI keeps `settings.toml`, `profiles.toml` and `slot_configs.toml` in:
+
+- macOS: `~/Library/Application Support/com.mc5000.charger/` (the app's bundle identifier)
+- Linux: `~/.config/mc5000/`
+- Windows: `%APPDATA%\mc5000\config\`
+
+`charger-controller/src/config_store.rs` owns these paths. Older macOS builds used
+`~/Library/Application Support/rs.mc5000/`; files there are moved on first launch.
+
 ### Continuous integration
 
 - `.github/workflows/tests.yml` – build, test and clippy on every pull request and on pushes to `main`.
