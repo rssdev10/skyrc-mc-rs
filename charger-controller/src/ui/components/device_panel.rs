@@ -5,11 +5,10 @@ use iced::{
 
 use crate::app::{AppMessage, ConnectionStatus};
 use crate::i18n::t;
-use mc5000_protocol::{Device, DeviceManager};
 
 pub fn view<'a>(
-    device_manager: &'a DeviceManager,
-    connected_device: &'a Option<Device>,
+    device_names: Vec<String>,
+    connected_name: Option<&'a str>,
     connection_status: &'a ConnectionStatus,
     selected_device: &'a Option<String>,
     scanning: bool,
@@ -27,14 +26,29 @@ pub fn view<'a>(
             .size(14)
             .color(iced::Color::from_rgb(0.2, 0.8, 0.2))
             .into(),
+        ConnectionStatus::Reconnecting(attempt) => text(t!("label.reconnecting", attempt = attempt).to_string())
+            .size(14)
+            .color(iced::Color::from_rgb(0.95, 0.6, 0.1))
+            .into(),
         ConnectionStatus::Error(msg) => text(format!("⚠ {}", msg))
             .size(14)
             .color(iced::Color::from_rgb(0.8, 0.2, 0.2))
             .into(),
     };
 
-    let device_controls: Element<AppMessage> = if connected_device.is_none() {
-        let available_devices = device_manager.get_available_devices().to_vec();
+    let device_controls: Element<AppMessage> = if let Some(name) = connected_name {
+        row![
+            text(format!("{} {}", t!("label.connected_to"), name)).size(14),
+            button(text(t!("btn.disconnect").to_string()).size(14))
+                .on_press(AppMessage::DisconnectDevice)
+                .style(button::danger)
+                .padding([4, 8]),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        let available_devices = device_names;
 
         let device_picker: Element<AppMessage> = if scanning {
             text(t!("label.scanning").to_string()).size(14).into()
@@ -56,7 +70,9 @@ pub fn view<'a>(
 
         let connect_button = button(text(t!("btn.connect").to_string()).size(14))
             .on_press_maybe(
-                if selected_device.is_some() && *connection_status != ConnectionStatus::Connecting {
+                if selected_device.is_some()
+                    && !matches!(connection_status, ConnectionStatus::Connecting | ConnectionStatus::Reconnecting(_))
+                {
                     Some(AppMessage::ConnectDevice)
                 } else {
                     None
@@ -68,20 +84,6 @@ pub fn view<'a>(
             .spacing(8)
             .align_y(iced::Center)
             .into()
-    } else {
-        let name = &connected_device.as_ref().unwrap().name;
-        let display_name = name.clone();
-
-        row![
-            text(format!("{} {}", t!("label.connected_to"), display_name)).size(14),
-            button(text(t!("btn.disconnect").to_string()).size(14))
-                .on_press(AppMessage::DisconnectDevice)
-                .style(button::danger)
-                .padding([4, 8]),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
     };
 
     let settings_button = button(text("⚙").size(16))

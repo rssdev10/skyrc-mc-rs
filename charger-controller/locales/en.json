@@ -96,8 +96,16 @@
   "config.import_profiles": "Import",
   "config.profile_name": "Profile name",
   "tooltip.auto": "Automatically detect battery type\nin non-active slots and start\ncharging with 500mA",
-  "tooltip.smart_charge": "Automatically detect battery type\nin non-active slots, determine current\nbased on internal resistance,\nand start charging",
+  "tooltip.smart_charge": "Detect the battery type in idle slots,\nmeasure internal resistance with a short\nlow-current probe, then charge at a\ncurrent chosen for the cell",
   "tooltip.stop_all": "Stop all processes for all slots",
   "tooltip.settings": "Open settings dialog",
-  "tooltip.configure_start": "Open battery configuration dialog\nand start process after confirmation"
+  "tooltip.configure_start": "Open battery configuration dialog\nand start process after confirmation",
+  "config.voltage_too_high": "Cannot start: the cell reads %{voltage} V, above the %{chemistry} limit of %{limit} V. It is probably another chemistry.",
+  "config.voltage_too_low": "Cannot start: the cell reads %{voltage} V, below the %{min} V a %{chemistry} cell can have. It is probably a nickel cell or a dead cell.",
+  "label.reconnecting": "Reconnecting… (attempt %{attempt})",
+  "notice.ambiguous_voltage": "Not started: %{voltage} V fits several chemistries. Use Configure.",
+  "notice.worn_cell": "Worn cell (%{resistance} mΩ): charging gently at %{current} mA.",
+  "notice.resistance_too_high": "Not charged: %{resistance} mΩ is too high (broken or not rechargeable).",
+  "notice.no_resistance": "Resistance not measured; charging at the probe current.",
+  "notice.command_failed": "Command failed: %{error}"
 }

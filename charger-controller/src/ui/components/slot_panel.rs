@@ -8,7 +8,9 @@ use crate::app::AppMessage;
 use crate::i18n::t;
 use crate::slot::{Slot, SlotState, TaskConfig, TaskType, BatteryChemistry};
 
-pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize, cmd_pending: bool) -> Element<'a, AppMessage> {
+// Per-slot UI state is passed through as separate values, as in `ui::main_view`.
+#[allow(clippy::too_many_arguments)]
+pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize, cmd_pending: bool, notice: Option<&'a str>) -> Element<'a, AppMessage> {
     if is_configuring {
         return config_dialog_view(slot, config);
     }
@@ -140,14 +142,20 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     };
 
     // Fixed-height content column
+    // Why Auto/Smart skipped or limited this cell, or why a command failed.
+    let notice_line = notice.map(|message| {
+        text(message.to_string()).size(11).color(iced::Color::from_rgb(0.95, 0.6, 0.1))
+    });
+
     let content = column![
         slot_header,
+        notice_line,
         measurements,
         bottom_row,
     ]
     .spacing(8)
     .padding(10)
-    .height(Length::Fixed(220.0));
+    .height(Length::Fixed(240.0));
 
     // Determine slot color for selection border
     let slot_color = match slot_index {

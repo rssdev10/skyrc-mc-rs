@@ -35,28 +35,17 @@ pub struct ConfigDialogState {
     pub selected_profile: Option<usize>,
     pub config_modified: bool, // Track if config was changed since profile was applied
     pub deleted_profile: Option<crate::profiles::Profile>, // For undo support
+    /// Why Confirm was refused (shown above the buttons); cleared on the next change.
+    pub error: Option<String>,
     /// Name of the last applied profile (persisted across sessions, resolved to index on open)
     pub last_profile_name: Option<String>,
 }
 
 impl ConfigDialogState {
     /// Detect battery chemistry based on current voltage
+    /// Chemistry the dialog proposes for a cell at `voltage_v` (see `auto_charge`).
     pub fn detect_chemistry_from_voltage(voltage_v: f32) -> BatteryChemistry {
-        // Use voltage ranges to suggest chemistry type
-        if voltage_v >= 4.0 {
-            BatteryChemistry::LiIon  // 4.2V nominal
-        } else if voltage_v >= 3.8 {
-            BatteryChemistry::LiIonHV  // 4.35V nominal
-        } else if voltage_v >= 3.3 {
-            BatteryChemistry::LiFePO4  // 3.65V nominal
-        } else if voltage_v >= 2.2 {
-            BatteryChemistry::LTO  // 2.8V nominal
-        } else if voltage_v >= 1.7 {
-            BatteryChemistry::NiZn  // 1.85V nominal
-        } else {
-            // Below 1.7V: NiMH/NiCd (nominal 1.2V, discharged can be 0.8-1.3V)
-            BatteryChemistry::NiMH
-        }
+        crate::auto_charge::suggest_chemistry(voltage_v)
     }
 
     pub fn new(voltage_v: f32) -> Self {
@@ -86,6 +75,7 @@ impl ConfigDialogState {
             selected_profile: None,
             config_modified: false,
             deleted_profile: None,
+            error: None,
             last_profile_name: None,
         }
     }
@@ -117,6 +107,7 @@ impl ConfigDialogState {
             selected_profile: None,
             config_modified: false,
             deleted_profile: None,
+            error: None,
             last_profile_name: p.last_profile_name.clone(),
         }
     }
@@ -133,6 +124,7 @@ impl ConfigDialogState {
 
     pub fn update_chemistry(&mut self, new_chemistry: BatteryChemistry) {
         self.chemistry = new_chemistry;
+        self.error = None;
         self.config = ChargeConfig::default_for_chemistry_and_mode(new_chemistry, self.mode);
         
         // Update all input fields with new defaults
@@ -154,6 +146,7 @@ impl ConfigDialogState {
 
     pub fn update_mode(&mut self, new_mode: ChargeMode) {
         self.mode = new_mode;
+        self.error = None;
         self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, new_mode);
         
         // Update all input fields
@@ -480,7 +473,11 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
     };
 
     left_col = left_col.push(
-        row![
+        column![
+            state.error.as_ref().map(|error| {
+                text(error.clone()).size(13).color(iced::Color::from_rgb(0.85, 0.2, 0.2))
+            }),
+            row![
             button(text(t!("btn.cancel").to_string()))
                 .on_press(AppMessage::ConfigDialogCancel)
                 .padding(10),
@@ -493,8 +490,10 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
                 .on_press(AppMessage::ConfigDialogConfirm)
                 .padding(10)
                 .style(button::primary),
+            ]
+            .spacing(10),
         ]
-        .spacing(10)
+        .spacing(6)
         .padding(iced::Padding { top: 15.0, right: 0.0, bottom: 0.0, left: 0.0 })
     );
 
