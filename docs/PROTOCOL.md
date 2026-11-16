@@ -170,15 +170,36 @@ Example from real device:
 | 13 | 00 | Unknown (always 0x00 observed) | ? |
 | 14-15 | XX XX | **Elapsed Time** (big-endian, seconds) | ✓ |
 | 16-17 | XX XX | **Resistance** (big-endian, mΩ): Battery internal resistance | ✓ |
-| 18 | XX | **Delta-V** (mV): Voltage drop for NiMH termination | ✓ |
-| 19 | XX | **Chemistry type?**: 0x00=LiIon, 0x02=NiMH (observed, unconfirmed) | ? |
+| 18 | XX | **Phase** of the slot: 0x00 idle, 0x02 charging, 0x03 discharging, 0x06 finished (see below). Previously misread as delta-V. | ✓ live |
+| 19 | XX | **Configured mode**, numbered per chemistry as in the 0x94 config (see below). Kept after a stop. | ✓ live |
 | 20 | 00 | Unknown (always 0x00 observed) | ? |
-| 21 | XX | **Slot index?**: 0x00/0x03 observed - meaning unclear | ? |
+| 21 | XX | **Configured chemistry**, same codes as the 0x94 config (0x00 Li-Ion, 0x03 NiMH observed). Kept after a stop. | ✓ live |
 | 22 | XX | Checksum (SUM mod 256 of bytes 2-21) | ✓ |
 
-**Status Byte Values (Byte 4) - VALIDATED:**
-| Value | State | Notes |
-|-------|-------|-------|
+**Phase, mode and chemistry (bytes 18, 19, 21) — verified on a live charger** with a Li-Ion cell
+and a NiMH cell, starting every mode the app offers and watching the status:
+
+| Byte 18 | Phase | Observed in |
+|---------|-------|-------------|
+| 0x00 | Idle | after every stop; empty slots |
+| 0x02 | Charging | Charge; the charge stage of Cycle, Refresh and Break-in |
+| 0x03 | Discharging | Discharge; Li-Ion Storage while pulling a full cell down to storage voltage |
+| 0x06 | Finished | NiMH Discharge after the charger ended it at the cutoff voltage |
+
+Other values (for example a rest between cycle stages) have not been observed yet.
+
+| Byte 19 | Li-Ion family | Nickel family (NiMH, NiCd, eneloop, NiZn) |
+|---------|---------------|-------------------------------------------|
+| 0x00 | Charge | Charge |
+| 0x01 | Storage | Refresh |
+| 0x02 | Discharge | Break-in |
+| 0x03 | Cycle | Discharge |
+| 0x04 | — | Cycle |
+
+Bytes 19 and 21 describe what was configured and stay set after a stop; byte 18 says whether
+it is running. Bytes 4–5 are always the current magnitude (no sign): use byte 18 for direction.
+
+-------|-------|-------|
 | 0x00 | Idle/Charging (NiMH) | For NiMH: if byte5 > 0, actively charging. Check voltage/byte5 to distinguish idle vs active |
 | 0x01 | Charging - CC mode | Constant Current phase (Li-Ion) - VALIDATED on slot 4 |
 | 0x02 | Charging - CV mode | Constant Voltage phase (current tapering) |
@@ -218,7 +239,13 @@ Example from real device:
 1. Send 0x94 config for the slot
 2. Send 0x93 with the slot's bitmask (e.g., 0x01 for slot 1)
 
-No per-slot stop command was observed; only `StopAll` (0x00) was used to stop operations.
+**Per-slot stop (verified on a live charger):** `0x93 0x00` stops only the slot selected by the
+preceding 0xFE query. `FE 02` + `93 00` stopped slot 2 while slot 4 kept running with its timer
+and capacity counters intact. A multi-slot FE mask does not work: `FE 0A` + `93 00` stopped
+only slot 2. To stop several slots, send FE + `93 00` once per slot.
+
+Starting a slot while another runs, with a start mask containing both (e.g. `93 0A`), left the
+running slot untouched (its timer kept counting).
 
 Examples:
 - Start all: `0f 03 93 03 96`
@@ -436,6 +463,27 @@ The checksum is the **SUM (mod 256)** of all bytes from the command byte to the 
 - `0f 15 91 01 00 c6 ... 03 75`: sum(0x91..0x03) = 0x75 ✓
 - `0f 04 94 01 01 96`: sum(0x94 + 0x01 + 0x01) = 0x96 ✓
 
+## Framing Received Data
+
+Frames are delimited by their length byte, not by BLE notifications. With a 20-byte notification
+payload (the BLE default on some platforms), a 23-byte 0x91 status frame arrives in two
+notifications; on macOS it arrives whole. The receiver (`FrameDecoder` in
+`mc5000-protocol/src/session.rs`) reassembles frames, accepts one only when its checksum matches,
+and resynchronizes on the next `0x0F` otherwise. It does not require a particular frame length,
+so a firmware that sends longer status frames still decodes.
+
+## Request Pacing (measured on a live charger)
+
+- The charger never sends 0x91 status on its own: it must be polled.
+- A 0x91 request with mask `0x0F` returns a single frame, so each slot needs its own request.
+- Requests sent too close together are silently dropped. Share of 0x91 requests answered, by
+  gap between requests: 0 ms ≈ 30 %, 10–50 ms ≈ 65–85 %, 100–150 ms ≈ 95–98 %.
+- The 0x57 handshake was not answered by the tested unit (its 0x74, 0x65 and 0xFE replies were:
+  `0f 04 74 01 01 76`, `0f 04 65 01 01 67`, `0f 04 fe 10 01 0f`).
+
+`Session` therefore keeps writes at least 120 ms apart, polls one slot at a time, and re-requests
+slots that did not answer.
+
 ## App Communication Flow
 
 1. Connect to device via BLE
@@ -445,14 +493,16 @@ The checksum is the **SUM (mod 256)** of all bytes from the command byte to the 
 5. **Send 0x25 session/auth blob?** (observed once in captures 1-2, NOT in capture 3; may be optional)
 6. Send 0x74 version query → get protocol version info
 7. Send 0x65 settings query → get device settings
-8. Send 0xFE query → unknown purpose (observed in capture 3)
+8. Send 0xFE query (`FE 00`) → **stops every running program** (verified live; see below). This client does not send it.
 9. Send 0x94 config for each slot to be used
 10. Send 0x93 start (bitmask for slots, e.g. 0x0B = slots 1+2+4)
 11. **Poll channel status (0x91) continuously** for all slots at ~2s intervals
 12. Send 0x93 stop (0x00=all) when done
 
-**CRITICAL - Init Sequence Required for Control Commands:**
-The init sequence (steps 6-8: 0x74 → 0x65 → 0xFE) MUST be sent after the handshake for the device to accept start/stop commands. Without this sequence, the device acknowledges config packets (0x94) but silently ignores start/stop (0x93). This was confirmed by live testing: stop commands failed until the init sequence was added to the connect flow.
+**CRITICAL - The general 0xFE query stops all running programs (verified on a live charger):**
+A NiMH charge running on slot 2 kept running after `0x74` and `0x65`, and after `FE 08` (a per-slot query for another slot), but stopped at once (idle, timer reset) after `FE 00`. Connecting with the full app init sequence therefore stops every running program.
+
+Start and stop do **not** need the init sequence: with only the 0x57 handshake, `FE <slot>` + 0x94 config + 0x93 start started a slot, and `FE <slot>` + `93 00` stopped it. (An earlier note claimed start/stop were ignored without init; the per-slot FE query in those sequences is what selects the slot.) This client sends only `0x74` and `0x65` on connect, so connecting and reconnecting never interrupt a charge. Verified: a charge kept running, timer and capacity counting on, through a connect with this init and four automatic reconnects.
 
 **CRITICAL - Multi-Slot Start Command:**
 The start command (0x93) sets the COMPLETE active slot set. Sending start(0x01) for slot 1 followed by start(0x02) for slot 2 in separate sessions does NOT result in both slots running — each start replaces the previous one. To start multiple slots:
@@ -462,8 +512,12 @@ The start command (0x93) sets the COMPLETE active slot set. Sending start(0x01) 
 **CRITICAL - Continuous Polling Required:**
 The device appears to require ongoing status polling (0x91) to keep operations active. Operations stop within seconds of BLE disconnection if no polling has been maintained. The official app polls all 4 slots every ~2 seconds throughout the session.
 
+> **Contradicted by a later live test:** a slot 4 discharge started from a polling session kept
+> running for ~90 s after that session disconnected, until it was stopped explicitly. Do not
+> rely on a disconnect to stop a program: always send the stop sequence.
+
 **Note on Init Sequence Side Effects:**
-When a NEW BLE session connects and sends the init sequence (0x74/0x65/0xFE), it may restart previously configured operations with reset timers and capacity counters. The device retains slot configurations across BLE sessions but the elapsed-time and capacity-accumulated counters reset on re-init.
+Superseded by the verified finding above: it is `FE 00` that stops running programs; `0x74` and `0x65` leave them untouched.
 
 ## Voltage Examples (VALIDATED)
 

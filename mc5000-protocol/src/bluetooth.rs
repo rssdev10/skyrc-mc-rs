@@ -173,6 +173,25 @@ impl OperationMode {
     }
 
     /// Parse operation mode from protocol byte (Li-Ion mapping)
+    /// Inverse of [`OperationMode::to_byte_for_chemistry`].
+    pub fn from_byte_for_chemistry(byte: u8, chemistry: BatteryChemistry) -> Option<Self> {
+        let nickel = matches!(
+            chemistry,
+            BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop | BatteryChemistry::NiZn
+        );
+        match (nickel, byte) {
+            (_, 0x00) => Some(OperationMode::Charge),
+            (true, 0x01) => Some(OperationMode::Refresh),
+            (true, 0x02) => Some(OperationMode::BreakIn),
+            (true, 0x03) => Some(OperationMode::Discharge),
+            (true, 0x04) => Some(OperationMode::Cycle),
+            (false, 0x01) => Some(OperationMode::Storage),
+            (false, 0x02) => Some(OperationMode::Discharge),
+            (false, 0x03) => Some(OperationMode::Cycle),
+            _ => None,
+        }
+    }
+
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0x00 => Some(OperationMode::Charge),
@@ -452,7 +471,9 @@ impl MC5000Protocol {
         Self::build_packet(0xFE, &[channel])
     }
 
-    /// Build 0xFE general query command (channel 0x00)
+    /// Build 0xFE general query command (channel 0x00).
+    ///
+    /// Warning: on a live charger this stops every running program.
     pub fn build_fe_query_command() -> Vec<u8> {
         Self::build_packet(0xFE, &[0x00])
     }
@@ -705,23 +726,25 @@ impl MC5000Protocol {
         Ok(found)
     }
 
-    /// Check if a device is an MC5000 based on name or advertised services
+    /// Check if a device is an MC5000 based on its advertised name.
+    ///
+    /// The charger does not advertise its service UUID, so the name is all there is.
+    /// Units advertise as `#Charger-XXXX` (some stacks drop the `#`), where `XXXX` is
+    /// the end of the unit's own address.
     fn is_mc5000_device(name: &str, _properties: &btleplug::api::BDAddr) -> bool {
-        // Check device name patterns based on actual CSV log findings
-        // Be more specific to avoid matching TVs and other devices
         let name_lower = name.to_lowercase();
-        if name_lower.contains("mc5000") || 
-           name_lower.contains("skyrc") ||
-           name_lower.starts_with("#charger") ||
-           (name_lower.starts_with("charger") && (name_lower.contains("ff-") || name_lower.contains("ff34"))) ||
-           name_lower.contains("telinkse") {
-            return true;
-        }
+        name_lower.contains("mc5000")
+            || name_lower.contains("skyrc")
+            || name_lower.contains("telinkse")
+            || name_lower.starts_with("#charger")
+            || (name_lower.starts_with("charger") && Self::name_suffix(name).is_some())
+    }
 
-        // In a real implementation, you would also check advertised services
-        // properties.services.contains(&MC5000_SERVICE_UUID.parse().unwrap())
-        
-        false
+    /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
+    fn name_suffix(name: &str) -> Option<String> {
+        let suffix = name.rsplit(['-', '_', ' ']).next()?;
+        (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| suffix.to_ascii_uppercase())
     }
 
     /// Connect to a specific MC5000 device (with full init sequence)
@@ -902,10 +925,20 @@ impl MC5000Protocol {
         debug_print!("[DEBUG]   Response char: {:?}", response_char);
         debug_print!("[DEBUG]   Notify char: {:?}", notify_char);
         
-        // Send handshake to activate device communication
-        // Use generic handshake since we don't have BT suffix yet
-        verbose_print!("Sending handshake (0x57)...");
-        let handshake = Self::build_device_info_command("FF34");  // Default suffix
+        // Send handshake to activate device communication. It carries the last two
+        // address bytes, which the charger also advertises in its name ("#Charger-FF34").
+        let advertised_name = peripheral
+            .properties()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.local_name);
+        let suffix = advertised_name
+            .as_deref()
+            .and_then(Self::name_suffix)
+            .unwrap_or_else(|| "FF34".to_string());
+        verbose_print!("Sending handshake (0x57) with suffix {}...", suffix);
+        let handshake = Self::build_device_info_command(&suffix);
         self.send_command(&handshake).await?;
         verbose_print!("✓ Handshake sent, waiting for device response...");
         
@@ -913,9 +946,9 @@ impl MC5000Protocol {
         time::sleep(Duration::from_millis(500)).await;
 
         // Send initialization commands matching official app sequence:
-        // version(0x74) → settings(0x65) → 0xFE query
+        // version(0x74) → settings(0x65); never the general 0xFE query, which stops all slots
         // Without these, the device may ignore control commands like stop.
-        verbose_print!("Sending init sequence (0x74, 0x65, 0xFE)...");
+        verbose_print!("Sending init sequence (0x74, 0x65)...");
         if send_init {
             self.send_init_sequence().await?;
             verbose_print!("✓ Init sequence complete");
@@ -928,20 +961,20 @@ impl MC5000Protocol {
         Ok(())
     }
 
-    /// Send the initialization sequence (0x74, 0x65, 0xFE).
-    /// Required before sending control commands (start/stop/config).
-    /// NOTE: Sending this on a new session may restart previously configured operations.
+    /// Send the session init queries the official app sends: 0x74 (version) and 0x65
+    /// (settings). Both leave running programs untouched.
+    ///
+    /// The app also sends the general 0xFE query (`FE 00`), but that **stops every running
+    /// program** (verified on a live charger), so it is deliberately not sent: connecting
+    /// must never stop a charge. Start and stop sequences select their slot with a per-slot
+    /// FE query instead, and work without any init.
     pub async fn send_init_sequence(&self) -> Result<(), BluetoothError> {
         let version_cmd = Self::build_version_command();
         self.send_command(&version_cmd).await?;
         time::sleep(Duration::from_millis(200)).await;
-        
+
         let settings_cmd = Self::build_settings_command();
         self.send_command(&settings_cmd).await?;
-        time::sleep(Duration::from_millis(200)).await;
-        
-        let fe_cmd = Self::build_fe_query_command();
-        self.send_command(&fe_cmd).await?;
         time::sleep(Duration::from_millis(200)).await;
         Ok(())
     }
@@ -1044,54 +1077,6 @@ impl MC5000Protocol {
         }
     }
 
-    /// Read response from device
-    pub async fn read_response(&self) -> Result<Vec<u8>, BluetoothError> {
-        verbose_print!("read_response called");
-        
-        // MC5000 only sends responses via NOTIFICATIONS, not via READ
-        // This function should not be used for MC5000 - use notification stream instead
-        verbose_print!("WARNING: MC5000 does not support read responses - use notifications!");
-        
-        Err(BluetoothError::CommunicationError(
-            "MC5000 only responds via notifications, not read operations".to_string()
-        ))
-    }
-
-    /// Get device information
-    pub async fn get_device_info(&self) -> Result<MC5000DeviceInfo, BluetoothError> {
-        debug_print!("[DEBUG] Sending device info request command...");
-        let info_command = [0x01, 0x10]; // Example command for device info
-        self.send_command(&info_command).await?;
-        debug_print!("[DEBUG] Command sent, waiting for response...");
-        time::sleep(Duration::from_millis(100)).await;
-        let response = self.read_response().await?;
-        debug_print!("[DEBUG] Raw device info response: {:?}", response);
-        let device_info = MC5000DeviceInfo::parse_from_response(&response)?;
-        Ok(device_info)
-    }
-
-    /// Get slot status
-    pub async fn get_slot_status(&self, slot_id: u8) -> Result<MC5000SlotStatus, BluetoothError> {
-        verbose_print!("get_slot_status called for slot {}", slot_id);
-        
-        // Convert slot ID to channel bitmask (slot 1=0x01, 2=0x02, 3=0x04, 4=0x08)
-        let channel_mask = 1u8 << (slot_id - 1);
-        verbose_print!("Channel mask for slot {}: 0x{:02X}", slot_id, channel_mask);
-        
-        // Build proper 0x91 status request command
-        let status_command = Self::build_channel_status_command(channel_mask);
-        verbose_print!("Status command: {:02X?}", status_command);
-        
-        self.send_command(&status_command).await?;
-        verbose_print!("Status command sent, device will respond via notification");
-        
-        // MC5000 only responds via notifications, not via read
-        // Return error immediately - caller must use notification stream
-        Err(BluetoothError::CommunicationError(
-            "MC5000 only responds via notifications - use notification stream to receive status".to_string()
-        ))
-    }
-    
     /// Request slot status (fire-and-forget, response comes via notification)
     pub async fn request_slot_status(&self, slot_id: u8) -> Result<(), BluetoothError> {
         verbose_print!("request_slot_status called for slot {}", slot_id);
@@ -1110,35 +1095,6 @@ impl MC5000Protocol {
         Ok(())
     }
 
-    /// Start charging on a slot
-    pub async fn start_charge(&self, slot_id: u8, voltage: f32, current: f32) -> Result<(), BluetoothError> {
-        // Convert float values to protocol format
-        let voltage_mv = (voltage * 1000.0) as u16;
-        let current_ma = (current * 1000.0) as u16;
-        
-        let command = [
-            0x03, // Start charge command
-            slot_id,
-            (voltage_mv >> 8) as u8,
-            (voltage_mv & 0xFF) as u8,
-            (current_ma >> 8) as u8,
-            (current_ma & 0xFF) as u8,
-        ];
-        
-        self.send_command(&command).await?;
-        log::info!("Started charging slot {} at {}V/{}A", slot_id, voltage, current);
-        
-        Ok(())
-    }
-
-    /// Stop operation on a slot
-    pub async fn stop_slot(&self, slot_id: u8) -> Result<(), BluetoothError> {
-        let command = [0x04, slot_id]; // Stop command
-        self.send_command(&command).await?;
-        log::info!("Stopped operation on slot {}", slot_id);
-        
-        Ok(())
-    }
 }
 
 /// Charging configuration for a slot
@@ -1526,7 +1482,22 @@ pub struct MC5000SlotStatus {
     pub elapsed_seconds: u16,
     pub resistance_milliohm: u16,
     pub temperature: u8,
-    pub deltav_mv: u8,  // Voltage drop for charge detection
+    /// Byte 18: what the slot is doing. Observed: 0 idle, 2 charging, 3 discharging,
+    /// 6 finished. `None` for frames shorter than the 23-byte layout.
+    pub phase: Option<u8>,
+    /// Byte 19: the configured program, in the per-chemistry numbering of the 0x94
+    /// config. Kept after a stop, so it says what was set up, not that it is running.
+    pub mode: Option<OperationMode>,
+    /// Byte 21: the configured chemistry (same codes as the 0x94 config).
+    pub chemistry: Option<BatteryChemistry>,
+}
+
+/// Status byte 18 values observed on a live charger.
+pub mod phase {
+    pub const IDLE: u8 = 0;
+    pub const CHARGING: u8 = 2;
+    pub const DISCHARGING: u8 = 3;
+    pub const FINISHED: u8 = 6;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1610,25 +1581,34 @@ impl MC5000SlotStatus {
             0
         };
 
-        // Delta-V: byte 18 (NiMH charge termination indicator, mV)
-        let deltav_mv = if response.len() >= 19 {
-            response[18]
-        } else {
-            0
-        };
+        // Bytes 18, 19, 21 (23-byte layout): phase, configured mode, configured chemistry.
+        // Byte 18 was once read as a delta-V value; live testing of every mode showed it is
+        // the slot's phase (see `phase`).
+        let extended = response.len() >= 23;
+        let phase = extended.then(|| response[18]);
+        let chemistry = extended
+            .then(|| BatteryChemistry::from_protocol_byte(response[21]))
+            .flatten();
+        let mode = chemistry.and_then(|c| OperationMode::from_byte_for_chemistry(response[19], c));
 
-        // Derive device state from current + voltage + capacity/elapsed.
-        // There is no separate status/mode byte — bytes [4-5] are the current itself.
         let state = if voltage_mv == 0 {
             MC5000SlotState::Empty
-        } else if current_ma > 0 {
-            // Active: charging or discharging. Direction is tracked by the app via task type.
-            MC5000SlotState::Charging
-        } else if elapsed_seconds > 0 && capacity_mah > 0 {
-            // Current dropped to zero after some activity → cycle finished.
-            MC5000SlotState::Completed
         } else {
-            MC5000SlotState::Idle
+            match phase {
+                Some(phase::IDLE) => MC5000SlotState::Idle,
+                Some(phase::CHARGING) => MC5000SlotState::Charging,
+                Some(phase::DISCHARGING) => MC5000SlotState::Discharging,
+                Some(phase::FINISHED) => MC5000SlotState::Completed,
+                // Unobserved phase values (for example a rest between cycle stages):
+                // fall back to what the current says.
+                Some(_) if current_ma > 0 => MC5000SlotState::Charging,
+                Some(_) if elapsed_seconds > 0 => MC5000SlotState::Paused,
+                Some(_) => MC5000SlotState::Idle,
+                // Short frame (other firmware): current-based guess, direction unknown.
+                None if current_ma > 0 => MC5000SlotState::Charging,
+                None if elapsed_seconds > 0 => MC5000SlotState::Completed,
+                None => MC5000SlotState::Idle,
+            }
         };
 
         Ok(MC5000SlotStatus {
@@ -1640,8 +1620,22 @@ impl MC5000SlotStatus {
             elapsed_seconds,
             resistance_milliohm,
             temperature: 0, // Temperature not available in this protocol response
-            deltav_mv,
+            phase,
+            mode,
+            chemistry,
         })
+    }
+
+    /// Whether a program is running on the slot (including a rest between its stages).
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.state,
+            MC5000SlotState::Charging
+                | MC5000SlotState::ChargingCC
+                | MC5000SlotState::ChargingCV
+                | MC5000SlotState::Discharging
+                | MC5000SlotState::Paused
+        )
     }
 
     /// Get voltage in volts
@@ -1658,5 +1652,117 @@ impl MC5000SlotStatus {
     pub fn power_w(&self) -> f32 {
         // voltage (mV) * current (mA) -> µW; divide by 1e6 to watts
         (self.voltage_mv as f32 * self.current_ma as f32) / 1_000_000.0
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_suffix_takes_the_trailing_hex_unit_id() {
+        assert_eq!(MC5000Protocol::name_suffix("#Charger-FF34").as_deref(), Some("FF34"));
+        assert_eq!(MC5000Protocol::name_suffix("Charger-e56a").as_deref(), Some("E56A"));
+        assert_eq!(MC5000Protocol::name_suffix("Charger"), None);
+        assert_eq!(MC5000Protocol::name_suffix("Charger-XYZ1"), None);
+    }
+
+    #[test]
+    fn detects_chargers_by_name_regardless_of_unit_id() {
+        let addr = btleplug::api::BDAddr::default();
+        for name in ["#Charger-FF34", "#Charger-E56A", "Charger-E56A", "SkyRC MC5000"] {
+            assert!(MC5000Protocol::is_mc5000_device(name, &addr), "{name}");
+        }
+        for name in ["Charger", "Phone Charger", "43\" Crystal UHD"] {
+            assert!(!MC5000Protocol::is_mc5000_device(name, &addr), "{name}");
+        }
+    }
+
+    fn parse(frame: &[u8]) -> MC5000SlotStatus {
+        MC5000SlotStatus::parse_from_response(frame).expect("valid status frame")
+    }
+
+    // Frames received from a real charger while testing every mode.
+    const LIION_DISCHARGING: [u8; 23] = [
+        0x0F, 0x15, 0x91, 0x08, 0x01, 0xF8, 0x0F, 0xFE, 0, 0, 0, 0, 0, 0, 0, 0x03, 0x00, 0x1F,
+        0x03, 0x02, 0x00, 0x00, 0xC6,
+    ];
+    const NIMH_CYCLE_CHARGING: [u8; 23] = [
+        0x0F, 0x15, 0x91, 0x02, 0x00, 0x8C, 0x05, 0x59, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0xE7,
+        0x02, 0x04, 0x00, 0x03, 0x6E,
+    ];
+    const NIMH_DISCHARGE_FINISHED: [u8; 23] = [
+        0x0F, 0x15, 0x91, 0x02, 0x00, 0x00, 0x04, 0x8F, 0, 0, 0, 0, 0, 0, 0, 0x0A, 0x00, 0xE6,
+        0x06, 0x03, 0x00, 0x03, 0x22,
+    ];
+    const NIMH_IDLE_AFTER_STOP: [u8; 23] = [
+        0x0F, 0x15, 0x91, 0x02, 0x00, 0x00, 0x04, 0xDB, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0x00,
+        0x00, 0x03, 0x00, 0x03, 0x78,
+    ];
+
+    #[test]
+    fn status_reports_discharging_from_the_phase_byte() {
+        let s = parse(&LIION_DISCHARGING);
+        assert_eq!((s.slot_id, s.current_ma, s.voltage_mv), (4, 504, 4094));
+        assert_eq!(s.state, MC5000SlotState::Discharging);
+        assert_eq!(s.mode, Some(OperationMode::Discharge));
+        assert_eq!(s.chemistry, Some(BatteryChemistry::LiIon));
+        assert!(s.is_running());
+    }
+
+    #[test]
+    fn status_decodes_the_nickel_mode_numbering() {
+        let s = parse(&NIMH_CYCLE_CHARGING);
+        assert_eq!(s.state, MC5000SlotState::Charging);
+        assert_eq!(s.mode, Some(OperationMode::Cycle));
+        assert_eq!(s.chemistry, Some(BatteryChemistry::NiMH));
+    }
+
+    #[test]
+    fn status_reports_a_program_the_charger_finished() {
+        let s = parse(&NIMH_DISCHARGE_FINISHED);
+        assert_eq!(s.state, MC5000SlotState::Completed);
+        assert_eq!(s.mode, Some(OperationMode::Discharge));
+        assert!(!s.is_running());
+    }
+
+    #[test]
+    fn idle_slot_still_reports_its_configured_mode() {
+        let s = parse(&NIMH_IDLE_AFTER_STOP);
+        assert_eq!(s.state, MC5000SlotState::Idle);
+        assert_eq!(s.mode, Some(OperationMode::Discharge));
+        assert!(!s.is_running());
+    }
+
+    #[test]
+    fn mode_bytes_round_trip_for_each_chemistry_family() {
+        let li = [OperationMode::Charge, OperationMode::Storage, OperationMode::Discharge, OperationMode::Cycle];
+        let ni = [
+            OperationMode::Charge,
+            OperationMode::Refresh,
+            OperationMode::BreakIn,
+            OperationMode::Discharge,
+            OperationMode::Cycle,
+        ];
+        for (chemistry, modes) in [(BatteryChemistry::LiIon, &li[..]), (BatteryChemistry::NiMH, &ni[..])] {
+            for &mode in modes {
+                let byte = mode.to_byte_for_chemistry(chemistry);
+                assert_eq!(OperationMode::from_byte_for_chemistry(byte, chemistry), Some(mode));
+            }
+        }
+    }
+
+    #[test]
+    fn short_frames_fall_back_to_the_current() {
+        let s = parse(&LIION_DISCHARGING[..12]);
+        assert_eq!(s.state, MC5000SlotState::Charging);
+        assert_eq!((s.phase, s.mode), (None, None));
+    }
+
+    #[test]
+    fn handshake_carries_the_unit_suffix() {
+        let packet = MC5000Protocol::build_device_info_command("E56A");
+        assert_eq!(&packet[..6], &[0x0F, 0x13, 0x57, 0x00, 0xE5, 0x6A]);
+        let sum = packet[2..packet.len() - 1].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert_eq!(packet[packet.len() - 1], sum);
     }
 }
