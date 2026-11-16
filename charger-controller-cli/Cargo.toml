@@ -13,12 +13,7 @@ path = "src/main.rs"
 [dependencies]
 mc5000-protocol = { path = "../mc5000-protocol" }
 tokio = { workspace = true }
-serde = { workspace = true }
-log = { workspace = true }
 chrono = { workspace = true }
-futures = { workspace = true }
-btleplug = { workspace = true }
-tokio-stream = { workspace = true }
 
 # CLI dependencies
 clap = { version = "4.5", features = ["derive"] }

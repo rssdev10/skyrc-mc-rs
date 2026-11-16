@@ -1,19 +1,18 @@
 //! MC5000 Charger Controller CLI
-//! 
-//! Command-line interface for the MC5000 battery charger.
+//!
+//! Command-line interface for the MC5000 battery charger. Every command talks to the
+//! charger through [`mc5000_protocol::Session`], the same connection the GUI uses.
 
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use mc5000_protocol::{
-    MC5000Protocol, BatteryChemistry, ChargeConfig, StartStopAction,
-    MC5000SlotState, OperationMode,
+    BatteryChemistry, ChargeConfig, ConnectMode, MC5000Protocol, MC5000SlotState,
+    MC5000SlotStatus, OperationMode, Session, SessionEvent,
 };
-use btleplug::api::Peripheral as _;
-use futures::stream::StreamExt;
 use tokio::runtime::Runtime;
 
 #[derive(Parser)]
@@ -172,16 +171,6 @@ enum Commands {
         #[arg(short, long, default_value = "10")]
         duration: u64,
     },
-    
-    /// Run protocol 3 test: break-in slot 4 + cycle slot 1 + charge slot 2 in one session
-    Proto3 {},
-    
-    /// Run protocol 4 reproduction: full capture 4 sequence (NiMH/Li-Ion/LiFePO4/RAM)
-    Proto4 {
-        /// Run in dry-run mode (build and print packets without sending)
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 fn parse_chemistry(s: &str) -> Option<BatteryChemistry> {
@@ -254,402 +243,292 @@ fn state_name(state: &MC5000SlotState) -> &'static str {
     }
 }
 
+
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     let cli = Cli::parse();
-    
+
     if cli.verbose {
         std::env::set_var("MC5000_VERBOSE", "1");
         println!("[INFO] Verbose mode enabled");
     }
-    
-    let rt = Runtime::new()?;
-    rt.block_on(async {
-        run_command(cli).await
-    })
+
+    Runtime::new()?.block_on(run_command(cli))
 }
 
 async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
-    let timeout_duration = Duration::from_secs(600); // Proto4 needs ~5 min with polling
-    
-    tokio::time::timeout(timeout_duration, async {
-        match &cli.command {
-            None | Some(Commands::Monitor { .. }) => {
-                let interval = match &cli.command {
-                    Some(Commands::Monitor { interval }) => *interval,
-                    _ => 2,
-                };
-                run_monitor(cli.verbose, interval).await
-            }
-            Some(Commands::Scan) => run_scan(cli.verbose).await,
-            Some(Commands::Status { slot }) => run_status(cli.verbose, *slot).await,
-            Some(Commands::Charge { slot, chemistry, current, capacity }) => {
-                let chem = parse_chemistry(chemistry)
-                    .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
-                run_charge(cli.verbose, *slot, chem, *current, *capacity).await
-            }
-            Some(Commands::Discharge { slot, chemistry, current, capacity }) => {
-                let chem = parse_chemistry(chemistry)
-                    .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
-                run_discharge(cli.verbose, *slot, chem, *current, *capacity).await
-            }
-            Some(Commands::Stop { slot }) => run_stop(cli.verbose, *slot).await,
-            Some(Commands::Cycle { slot, chemistry, current, capacity }) => {
-                let chem = parse_chemistry(chemistry)
-                    .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
-                run_cycle(cli.verbose, *slot, chem, *current, *capacity).await
-            }
-            Some(Commands::Refresh { slot, chemistry, current, discharge_current, capacity }) => {
-                let chem = parse_chemistry(chemistry)
-                    .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
-                run_refresh(cli.verbose, *slot, chem, *current, *discharge_current, *capacity).await
-            }
-            Some(Commands::BreakIn { slot, chemistry, current, capacity }) => {
-                let chem = parse_chemistry(chemistry)
-                    .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
-                run_break_in(cli.verbose, *slot, chem, *current, *capacity).await
-            }
-            Some(Commands::Auto { slot, current }) => run_auto(cli.verbose, *slot, *current).await,
-            Some(Commands::Debug { duration }) => run_debug(cli.verbose, *duration).await,
-            Some(Commands::Proto3 {}) => run_proto3(cli.verbose).await,
-            Some(Commands::Proto4 { dry_run }) => run_proto4(cli.verbose, *dry_run).await,
+    match &cli.command {
+        None => run_monitor(cli.verbose, 2).await,
+        Some(Commands::Monitor { interval }) => run_monitor(cli.verbose, *interval).await,
+        Some(Commands::Scan) => run_scan(cli.verbose).await,
+        Some(Commands::Status { slot }) => run_status(cli.verbose, *slot).await,
+        Some(Commands::Charge { slot, chemistry, current, capacity }) => {
+            let chem = parse_chemistry(chemistry)
+                .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
+            run_charge(cli.verbose, *slot, chem, *current, *capacity).await
         }
-    }).await?
-}
-async fn connect_to_device(verbose: bool) -> Result<(MC5000Protocol, btleplug::platform::Peripheral), Box<dyn Error>> {
-    println!("Scanning for MC5000 devices (5s)...");
-    let devices = MC5000Protocol::scan_devices(5).await?;
-    
-    if devices.is_empty() {
-        return Err("No Bluetooth devices found".into());
-    }
-    
-    if verbose {
-        println!("Found {} devices:", devices.len());
-        for dev in &devices {
-            println!("  {} (RSSI: {:?}){}",
-                dev.name, dev.rssi,
-                if dev.is_mc5000 { " <<< MC5000" } else { "" });
+        Some(Commands::Discharge { slot, chemistry, current, capacity }) => {
+            let chem = parse_chemistry(chemistry)
+                .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
+            run_discharge(cli.verbose, *slot, chem, *current, *capacity).await
         }
+        Some(Commands::Stop { slot }) => run_stop(cli.verbose, *slot).await,
+        Some(Commands::Cycle { slot, chemistry, current, capacity }) => {
+            let chem = parse_chemistry(chemistry)
+                .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
+            run_cycle(cli.verbose, *slot, chem, *current, *capacity).await
+        }
+        Some(Commands::Refresh { slot, chemistry, current, discharge_current, capacity }) => {
+            let chem = parse_chemistry(chemistry)
+                .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
+            run_refresh(cli.verbose, *slot, chem, *current, *discharge_current, *capacity).await
+        }
+        Some(Commands::BreakIn { slot, chemistry, current, capacity }) => {
+            let chem = parse_chemistry(chemistry)
+                .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
+            run_break_in(cli.verbose, *slot, chem, *current, *capacity).await
+        }
+        Some(Commands::Auto { slot, current }) => run_auto(cli.verbose, *slot, *current).await,
+        Some(Commands::Debug { duration }) => run_debug(cli.verbose, *duration).await,
     }
-    
-    let mc5000 = devices.into_iter()
-        .find(|d| d.is_mc5000)
-        .ok_or("No MC5000 device found")?;
-    
-    println!("Connecting to {}...", mc5000.name);
-    let mut protocol = MC5000Protocol::new();
-    protocol.connect(&mc5000.peripheral).await?;
-    println!("Connected!\n");
-    
-    Ok((protocol, mc5000.peripheral))
 }
 
-/// Connect in read-only mode (no init sequence — won't disrupt running operations)
-async fn connect_to_device_readonly(verbose: bool) -> Result<(MC5000Protocol, btleplug::platform::Peripheral), Box<dyn Error>> {
+/// How long to wait for one slot's status before re-requesting or giving up.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Scans and connects to the first MC5000 found.
+async fn connect(verbose: bool, mode: ConnectMode) -> Result<Session, Box<dyn Error>> {
     println!("Scanning for MC5000 devices (5s)...");
-    let devices = MC5000Protocol::scan_devices(5).await?;
-    
-    if devices.is_empty() {
-        return Err("No Bluetooth devices found".into());
-    }
-    
+    let chargers = Session::scan(5).await?;
+
     if verbose {
-        println!("Found {} devices:", devices.len());
-        for dev in &devices {
-            println!("  {} (RSSI: {:?}){}",
-                dev.name, dev.rssi,
-                if dev.is_mc5000 { " <<< MC5000" } else { "" });
+        println!("Found {} charger(s):", chargers.len());
+        for dev in &chargers {
+            println!("  {} (RSSI: {:?})", dev.name, dev.rssi);
         }
     }
-    
-    let mc5000 = devices.into_iter()
-        .find(|d| d.is_mc5000)
-        .ok_or("No MC5000 device found")?;
-    
-    println!("Connecting to {}...", mc5000.name);
-    let mut protocol = MC5000Protocol::new();
-    protocol.connect_without_init(&mc5000.peripheral).await?;
+
+    let charger = chargers.into_iter().next().ok_or("No MC5000 device found")?;
+    println!("Connecting to {}...", charger.name);
+    let session = Session::connect(&charger, mode).await?;
     println!("Connected!\n");
-    
-    Ok((protocol, mc5000.peripheral))
+    Ok(session)
 }
 
 async fn run_scan(verbose: bool) -> Result<(), Box<dyn Error>> {
     println!("=== Scanning for Bluetooth devices ===\n");
-    
+
     let devices = MC5000Protocol::scan_devices(5).await?;
-    
+
     if devices.is_empty() {
         println!("No devices found.");
         return Ok(());
     }
-    
+
     println!("Found {} devices:", devices.len());
     for dev in &devices {
         let mc5000_tag = if dev.is_mc5000 { " [MC5000]" } else { "" };
-        println!("  {} - {} (RSSI: {:?}){}",
-            dev.id, dev.name, dev.rssi, mc5000_tag);
-        
+        println!("  {} - {} (RSSI: {:?}){}", dev.id, dev.name, dev.rssi, mc5000_tag);
+
         if verbose {
             println!("    Address: {}", dev.address);
         }
     }
-    
+
     Ok(())
+}
+
+/// The configured program and chemistry the charger reports, e.g. "Li-Ion Discharge".
+fn mode_name(status: &MC5000SlotStatus) -> String {
+    match (status.chemistry, status.mode) {
+        (Some(chemistry), Some(mode)) => format!("{} {}", chemistry.name(), mode.name()),
+        (None, Some(mode)) => mode.name().to_string(),
+        _ => "unknown mode".to_string(),
+    }
 }
 
 fn is_valid_slot(slot: u8) -> bool {
     (1..=4).contains(&slot)
 }
 
-async fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
-    let (protocol, peripheral) = connect_to_device_readonly(verbose).await?;
-    
-    let slots = match slot {
-        Some(s) if is_valid_slot(s) => vec![s],
-        Some(s) => return Err(format!("Invalid slot: {}. Must be 1-4", s).into()),
-        None => vec![1, 2, 3, 4],
-    };
-    
-    // Set up notification listener to collect responses
-    use std::sync::Mutex;
-    use std::collections::HashMap;
-    
-    let slot_status: Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>> = 
-        Arc::new(Mutex::new(HashMap::new()));
-    let slot_status_clone = slot_status.clone();
-    let verbose_clone = verbose;
-    
-    let peripheral_clone = peripheral.clone();
-    tokio::spawn(async move {
-        if let Ok(mut stream) = peripheral_clone.notifications().await {
-            while let Some(notification) = stream.next().await {
-                let data = &notification.value;
-                if verbose_clone && data.len() >= 10 && data[0] == 0x0F && data[2] == 0x91 {
-                    println!("[RAW] Slot mask=0x{:02X} status=0x{:02X} byte5={} voltage={} data={:02X?}",
-                        data[3], data[4], data[5],
-                        u16::from_be_bytes([data[6], data[7]]),
-                        &data[..data.len().min(20)]);
-                }
-                if data.len() >= 10 && data[0] == 0x0F && data[2] == 0x91 {
-                    if let Ok(status) = mc5000_protocol::MC5000SlotStatus::parse_from_response(data) {
-                        let slot_id = match data[3] {
-                            0x01 => 1,
-                            0x02 => 2,
-                            0x04 => 3,
-                            0x08 => 4,
-                            _ => 0,
-                        };
-                        if slot_id > 0 {
-                            if let Ok(mut map) = slot_status_clone.lock() {
-                                map.insert(slot_id, status);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-    
-    // Give notification handler time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    
-    // Request status for each slot
-    for &slot_num in &slots {
-        let _ = protocol.request_slot_status(slot_num).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+fn check_slot(slot: u8) -> Result<(), Box<dyn Error>> {
+    if is_valid_slot(slot) {
+        Ok(())
+    } else {
+        Err(format!("Invalid slot: {}. Must be 1-4", slot).into())
     }
-    
-    // Wait for responses
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    println!("=== Slot Status ===\n");
-    println!("{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
-        "Slot", "State", "Voltage", "Current", "Capacity", "R(mΩ)", "Time");
+}
+
+/// The slots a command applies to: one slot, or all four.
+fn selected_slots(slot: Option<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
+    match slot {
+        Some(s) => check_slot(s).map(|()| vec![s]),
+        None => Ok(vec![1, 2, 3, 4]),
+    }
+}
+
+/// Mask of slots the charger reports as running a program.
+fn running_mask(statuses: &[Option<MC5000SlotStatus>; 4]) -> u8 {
+    statuses
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.as_ref().is_some_and(MC5000SlotStatus::is_running))
+        .fold(0, |mask, (i, _)| mask | 1 << i)
+}
+
+fn status_row(slot: u8, status: &MC5000SlotStatus) -> String {
+    let state_str = format!("{} {}", state_symbol(&status.state), state_name(&status.state));
+    let voltage = format!("{:.3}V", status.voltage_mv as f32 / 1000.0);
+    let current = format!("{}mA", status.current_ma);
+    let capacity = format!("{}mAh", status.capacity_mah);
+    let resistance = status.resistance_milliohm.to_string();
+    let time = format_time(status.elapsed_seconds);
+    format!(
+        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
+        slot, state_str, voltage, current, capacity, resistance, time
+    )
+}
+
+fn print_status_header() {
+    println!(
+        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
+        "Slot", "State", "Voltage", "Current", "Capacity", "R(mΩ)", "Time"
+    );
     println!("{}", "-".repeat(65));
-    
-    if let Ok(map) = slot_status.lock() {
-        for &slot_num in &slots {
-            if let Some(status) = map.get(&slot_num) {
-                let state_str = format!("{} {}", 
-                    state_symbol(&status.state), 
-                    state_name(&status.state));
-                let voltage = format!("{:.3}V", status.voltage_mv as f32 / 1000.0);
-                let current = format!("{}mA", status.current_ma);
-                let capacity = format!("{}mAh", status.capacity_mah);
-                let resistance = format!("{}", status.resistance_milliohm);
-                let time = format_time(status.elapsed_seconds);
-                
-                println!("{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
-                    slot_num, state_str, voltage, current, capacity, resistance, time);
-            } else {
-                println!("Slot {}: No response", slot_num);
-            }
+}
+
+async fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
+    let slots = selected_slots(slot)?;
+    let session = connect(verbose, ConnectMode::Monitor).await?;
+
+    let mut rows = Vec::with_capacity(slots.len());
+    for &slot_num in &slots {
+        rows.push((slot_num, session.read_status(slot_num, STATUS_TIMEOUT).await));
+    }
+
+    println!("=== Slot Status ===\n");
+    print_status_header();
+    for (slot_num, result) in &rows {
+        match result {
+            Ok(status) => println!("{}", status_row(*slot_num, status)),
+            Err(_) => println!("Slot {}: No response", slot_num),
         }
     }
-    
+
+    let _ = session.disconnect().await;
+    Ok(())
+}
+
+/// Connects, configures `config` and starts it, keeping slots that are already running.
+async fn start_operation(
+    verbose: bool,
+    title: &str,
+    details: &[String],
+    config: ChargeConfig,
+) -> Result<(), Box<dyn Error>> {
+    let session = connect(verbose, ConnectMode::Control).await?;
+
+    println!("=== Starting {} ===", title);
+    for line in details {
+        println!("{}", line);
+    }
+    println!();
+
+    let statuses = session.read_all_status(STATUS_TIMEOUT).await;
+    let keep_running = running_mask(&statuses) & !config.channel_bitmask;
+    for (i, status) in statuses.iter().enumerate() {
+        let bit = 1u8 << i;
+        if bit & config.channel_bitmask != 0 {
+            continue;
+        }
+        match status {
+            Some(s) if s.is_running() => println!(
+                "Slot {} is running ({}, {}mA); it keeps running.",
+                i + 1,
+                mode_name(s),
+                s.current_ma
+            ),
+            None => println!(
+                "Note: slot {} did not answer; if it is running, the start command may stop it.",
+                i + 1
+            ),
+            _ => {}
+        }
+    }
+
+    if verbose {
+        println!(
+            "  Config packet: {:02x?}",
+            MC5000Protocol::build_charge_config_command(&config)
+        );
+        println!("  Start mask: 0x{:02X}", keep_running | config.channel_bitmask);
+    }
+
+    println!("Sending configuration and start...");
+    session.start_slots(std::slice::from_ref(&config), keep_running).await?;
+    println!("  ✓ Configuration and start sent");
+
+    // Give the charger time to begin, then confirm from its own status report.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let slot = (1..=4u8)
+        .find(|s| config.channel_bitmask == 1 << (s - 1))
+        .unwrap_or(1);
+    match session.read_status(slot, STATUS_TIMEOUT).await {
+        Ok(status) if status.is_running() => println!(
+            "\n✓ SUCCESS: slot {} is running {} ({}): {:.3}V {}mA",
+            slot,
+            mode_name(&status),
+            state_name(&status.state),
+            status.voltage_mv as f32 / 1000.0,
+            status.current_ma
+        ),
+        Ok(status) => println!(
+            "\n⚠ WARNING: slot {} is not running ({}, {:.3}V). Check the charger's display.",
+            slot,
+            state_name(&status.state),
+            status.voltage_mv as f32 / 1000.0
+        ),
+        Err(e) => println!("\n⚠ WARNING: could not read slot {} status: {}", slot, e),
+    }
+
+    let _ = session.disconnect().await;
     Ok(())
 }
 
 async fn run_charge(
-    verbose: bool, 
-    slot: u8, 
-    chemistry: BatteryChemistry, 
-    current: u16, 
-    capacity: u16
+    verbose: bool,
+    slot: u8,
+    chemistry: BatteryChemistry,
+    current: u16,
+    capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if !is_valid_slot(slot) {
-        return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
-    }
-    
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    println!("=== Starting Charge ===");
-    println!("Slot: {}", slot);
-    println!("Chemistry: {}", chemistry_name(chemistry));
-    println!("Current: {}mA", current);
-    println!("Capacity: {}mAh", capacity);
-    println!();
-    
-    // Create charge configuration
-    let charge_config = ChargeConfig::new(slot, chemistry, mc5000_protocol::OperationMode::Charge, capacity, current);
-    
-    // Send configuration
-    println!("Sending configuration...");
-    let config_cmd = MC5000Protocol::build_charge_config_command(&charge_config);
-    if verbose {
-        println!("  Config packet: {:02x?}", config_cmd);
-    }
-    protocol.send_command(&config_cmd).await?;
-    println!("  ✓ Configuration sent");
-    
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    // Send start command for this specific slot
-    println!("Sending start command...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(1 << (slot - 1)));
-    if verbose {
-        println!("  Start packet: {:02x?}", start_cmd);
-    }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Start command sent");
-    
-    // Wait and verify
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    
-    match protocol.get_slot_status(slot).await {
-        Ok(status) => {
-            println!("\nStatus after start:");
-            println!("  State: {:?}", status.state);
-            println!("  Voltage: {:.3}V", status.voltage_mv as f32 / 1000.0);
-            println!("  Current: {}mA", status.current_ma);
-            
-            match status.state {
-                MC5000SlotState::Charging | MC5000SlotState::ChargingCC | MC5000SlotState::ChargingCV => {
-                    println!("\n✓ SUCCESS: Charging started!");
-                }
-                _ => {
-                    println!("\n⚠ WARNING: Not in charging state. State: {:?}", status.state);
-                }
-            }
-        }
-        Err(e) => println!("Error checking status: {}", e),
-    }
-    
-    Ok(())
+    check_slot(slot)?;
+    let details = [
+        format!("Slot: {}", slot),
+        format!("Chemistry: {}", chemistry_name(chemistry)),
+        format!("Current: {}mA", current),
+        format!("Capacity: {}mAh", capacity),
+    ];
+    let config = ChargeConfig::new(slot, chemistry, OperationMode::Charge, capacity, current);
+    start_operation(verbose, "Charge", &details, config).await
 }
 
 async fn run_discharge(
-    verbose: bool, 
-    slot: u8, 
-    chemistry: BatteryChemistry, 
-    current: u16, 
-    capacity: u16
+    verbose: bool,
+    slot: u8,
+    chemistry: BatteryChemistry,
+    current: u16,
+    capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if !is_valid_slot(slot) {
-        return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
-    }
-    
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    println!("=== Starting Discharge ===");
-    println!("Slot: {}", slot);
-    println!("Chemistry: {}", chemistry_name(chemistry));
-    println!("Discharge Current: {}mA", current);
-    println!("Capacity: {}mAh", capacity);
-    println!();
-    
-    // Create discharge configuration
-    let discharge_config = ChargeConfig::discharge(slot, chemistry, capacity, current);
-    
-    // Send configuration
-    println!("Sending configuration...");
-    let config_cmd = MC5000Protocol::build_charge_config_command(&discharge_config);
-    if verbose {
-        println!("  Config packet: {:02x?}", config_cmd);
-    }
-    protocol.send_command(&config_cmd).await?;
-    println!("  ✓ Configuration sent");
-    
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    // Send start command for this specific slot
-    println!("Sending start command...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(1 << (slot - 1)));
-    if verbose {
-        println!("  Start packet: {:02x?}", start_cmd);
-    }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Start command sent");
-    
-    // Wait and verify
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    
-    match protocol.get_slot_status(slot).await {
-        Ok(status) => {
-            println!("\nStatus after start:");
-            println!("  State: {:?}", status.state);
-            println!("  Voltage: {:.3}V", status.voltage_mv as f32 / 1000.0);
-            println!("  Current: {}mA", status.current_ma);
-            
-            match status.state {
-                MC5000SlotState::Discharging => {
-                    println!("\n✓ SUCCESS: Discharging started!");
-                }
-                _ => {
-                    println!("\n⚠ WARNING: Not in discharging state. State: {:?}", status.state);
-                }
-            }
-        }
-        Err(e) => println!("Error checking status: {}", e),
-    }
-    
-    Ok(())
-}
-
-async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    match slot {
-        Some(s) if is_valid_slot(s) => {
-            println!("Stopping slot {}...", s);
-            let stop_cmd = MC5000Protocol::build_start_stop_command(
-                StartStopAction::ChannelMask(1 << (s - 1))
-            );
-            protocol.send_command(&stop_cmd).await?;
-            println!("  ✓ Stop command sent for slot {}", s);
-        }
-        Some(s) => return Err(format!("Invalid slot: {}. Must be 1-4", s).into()),
-        None => {
-            println!("Stopping all slots...");
-            let stop_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::StopAll);
-            protocol.send_command(&stop_cmd).await?;
-            println!("  ✓ Stop all command sent");
-        }
-    }
-    
-    Ok(())
+    check_slot(slot)?;
+    let details = [
+        format!("Slot: {}", slot),
+        format!("Chemistry: {}", chemistry_name(chemistry)),
+        format!("Discharge Current: {}mA", current),
+        format!("Capacity: {}mAh", capacity),
+    ];
+    let config = ChargeConfig::discharge(slot, chemistry, capacity, current);
+    start_operation(verbose, "Discharge", &details, config).await
 }
 
 async fn run_cycle(
@@ -659,40 +538,15 @@ async fn run_cycle(
     current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if !is_valid_slot(slot) {
-        return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
-    }
-    
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    println!("=== Starting Cycle ===");
-    println!("Slot: {}", slot);
-    println!("Chemistry: {}", chemistry_name(chemistry));
-    println!("Charge Current: {}mA", current);
-    println!("Capacity: {}mAh", capacity);
-    println!();
-    
-    let cycle_config = ChargeConfig::cycle(slot, chemistry, capacity, current);
-    
-    println!("Sending configuration...");
-    let config_cmd = MC5000Protocol::build_charge_config_command(&cycle_config);
-    if verbose {
-        println!("  Config packet: {:02x?}", config_cmd);
-    }
-    protocol.send_command(&config_cmd).await?;
-    println!("  ✓ Configuration sent");
-    
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    println!("Sending start command...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(1 << (slot - 1)));
-    if verbose {
-        println!("  Start packet: {:02x?}", start_cmd);
-    }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Cycle started");
-    
-    Ok(())
+    check_slot(slot)?;
+    let details = [
+        format!("Slot: {}", slot),
+        format!("Chemistry: {}", chemistry_name(chemistry)),
+        format!("Charge Current: {}mA", current),
+        format!("Capacity: {}mAh", capacity),
+    ];
+    let config = ChargeConfig::cycle(slot, chemistry, capacity, current);
+    start_operation(verbose, "Cycle", &details, config).await
 }
 
 async fn run_refresh(
@@ -703,46 +557,21 @@ async fn run_refresh(
     discharge_current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if !is_valid_slot(slot) {
-        return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
-    }
-    
+    check_slot(slot)?;
     // Refresh is only for NiMH and NiCd
     if !matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd) {
         return Err("Refresh mode is only available for NiMH and NiCd chemistries".into());
     }
-    
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    println!("=== Starting Refresh ===");
-    println!("Slot: {}", slot);
-    println!("Chemistry: {}", chemistry_name(chemistry));
-    println!("Charge Current: {}mA", charge_current);
-    println!("Discharge Current: {}mA", discharge_current);
-    println!("Capacity: {}mAh", capacity);
-    println!();
-    
-    let refresh_config = ChargeConfig::refresh(slot, chemistry, capacity, charge_current, discharge_current);
-    
-    println!("Sending configuration...");
-    let config_cmd = MC5000Protocol::build_charge_config_command(&refresh_config);
-    if verbose {
-        println!("  Config packet: {:02x?}", config_cmd);
-    }
-    protocol.send_command(&config_cmd).await?;
-    println!("  ✓ Configuration sent");
-    
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    println!("Sending start command...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(1 << (slot - 1)));
-    if verbose {
-        println!("  Start packet: {:02x?}", start_cmd);
-    }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Refresh started");
-    
-    Ok(())
+    let details = [
+        format!("Slot: {}", slot),
+        format!("Chemistry: {}", chemistry_name(chemistry)),
+        format!("Charge Current: {}mA", charge_current),
+        format!("Discharge Current: {}mA", discharge_current),
+        format!("Capacity: {}mAh", capacity),
+    ];
+    let config =
+        ChargeConfig::refresh(slot, chemistry, capacity, charge_current, discharge_current);
+    start_operation(verbose, "Refresh", &details, config).await
 }
 
 async fn run_break_in(
@@ -752,201 +581,210 @@ async fn run_break_in(
     current: u16,
     capacity: u16,
 ) -> Result<(), Box<dyn Error>> {
-    if !is_valid_slot(slot) {
-        return Err(format!("Invalid slot: {}. Must be 1-4", slot).into());
-    }
-    
+    check_slot(slot)?;
     // Break-in is only for NiMH and NiCd
     if !matches!(chemistry, BatteryChemistry::NiMH | BatteryChemistry::NiCd) {
         return Err("Break-in mode is only available for NiMH and NiCd chemistries".into());
     }
-    
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    println!("=== Starting Break-In ===");
-    println!("Slot: {}", slot);
-    println!("Chemistry: {}", chemistry_name(chemistry));
-    println!("Charge Current: {}mA", current);
-    println!("Capacity: {}mAh", capacity);
+    let details = [
+        format!("Slot: {}", slot),
+        format!("Chemistry: {}", chemistry_name(chemistry)),
+        format!("Charge Current: {}mA", current),
+        format!("Capacity: {}mAh", capacity),
+    ];
+    let config = ChargeConfig::break_in(slot, chemistry, capacity, current);
+    start_operation(verbose, "Break-In", &details, config).await
+}
+
+async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
+    if let Some(s) = slot {
+        check_slot(s)?;
+    }
+    let session = connect(verbose, ConnectMode::Control).await?;
+
+    // The FE query selects the slots that 0x93 0x00 then stops; others keep running.
+    let stopped = match slot {
+        None => {
+            println!("Stopping all slots...");
+            session.stop_slots(0x0F).await?;
+            println!("  ✓ Stop all command sent");
+            0x0F
+        }
+        Some(s) => {
+            let bit = 1u8 << (s - 1);
+            println!("Stopping slot {}...", s);
+            session.stop_slots(bit).await?;
+            println!("  ✓ Stop command sent for slot {}", s);
+            bit
+        }
+    };
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
     println!();
-    
-    let break_in_config = ChargeConfig::break_in(slot, chemistry, capacity, current);
-    
-    println!("Sending configuration...");
-    let config_cmd = MC5000Protocol::build_charge_config_command(&break_in_config);
-    if verbose {
-        println!("  Config packet: {:02x?}", config_cmd);
+    print_status_header();
+    for slot_num in (1..=4u8).filter(|s| stopped & (1 << (s - 1)) != 0) {
+        match session.read_status(slot_num, STATUS_TIMEOUT).await {
+            Ok(status) => println!("{}", status_row(slot_num, &status)),
+            Err(_) => println!("Slot {}: No response", slot_num),
+        }
     }
-    protocol.send_command(&config_cmd).await?;
-    println!("  ✓ Configuration sent");
-    
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    println!("Sending start command...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(1 << (slot - 1)));
-    if verbose {
-        println!("  Start packet: {:02x?}", start_cmd);
-    }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Break-in started");
-    
+
+    let _ = session.disconnect().await;
     Ok(())
 }
 
 async fn run_auto(verbose: bool, slot: Option<u8>, initial_current: u16) -> Result<(), Box<dyn Error>> {
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
-    
-    let slots = match slot {
-        Some(s) if is_valid_slot(s) => vec![s],
-        Some(s) => return Err(format!("Invalid slot: {}. Must be 1-4", s).into()),
-        None => vec![1, 2, 3, 4],
-    };
-    
+    let slots = selected_slots(slot)?;
+    let session = connect(verbose, ConnectMode::Control).await?;
+
     println!("=== Auto-Charge Mode ===\n");
-    
+
+    let statuses = session.read_all_status(STATUS_TIMEOUT).await;
+    let mut configs = Vec::new();
     for slot_num in slots {
-        match protocol.get_slot_status(slot_num).await {
-            Ok(status) => {
-                if status.voltage_mv < 100 {
-                    println!("Slot {}: Empty, skipping", slot_num);
-                    continue;
-                }
-                
-                if !matches!(status.state, MC5000SlotState::Idle | MC5000SlotState::Empty) {
-                    println!("Slot {}: Already active ({:?}), skipping", slot_num, status.state);
-                    continue;
-                }
-                
-                let chemistry = detect_chemistry_from_voltage(status.voltage_mv as u32);
-                println!("Slot {}: Detected {} at {:.3}V",
-                    slot_num,
-                    chemistry_name(chemistry),
-                    status.voltage_mv as f32 / 1000.0);
-                
-                // Create charge configuration with initial current
-                let charge_config = ChargeConfig::new(slot_num, chemistry, mc5000_protocol::OperationMode::Charge, 3000, initial_current);
-                
-                let config_cmd = MC5000Protocol::build_charge_config_command(&charge_config);
-                protocol.send_command(&config_cmd).await?;
-                
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-            Err(e) => println!("Slot {}: Error - {}", slot_num, e),
+        let Some(status) = &statuses[usize::from(slot_num - 1)] else {
+            println!("Slot {}: No response, skipping", slot_num);
+            continue;
+        };
+        if status.voltage_mv < 100 {
+            println!("Slot {}: Empty, skipping", slot_num);
+            continue;
         }
+        if !matches!(status.state, MC5000SlotState::Idle | MC5000SlotState::Empty) {
+            println!("Slot {}: Already active or finished ({:?}), skipping", slot_num, status.state);
+            continue;
+        }
+
+        let chemistry = detect_chemistry_from_voltage(status.voltage_mv as u32);
+        println!(
+            "Slot {}: Detected {} at {:.3}V",
+            slot_num,
+            chemistry_name(chemistry),
+            status.voltage_mv as f32 / 1000.0
+        );
+        configs.push(ChargeConfig::new(
+            slot_num,
+            chemistry,
+            OperationMode::Charge,
+            3000,
+            initial_current,
+        ));
     }
-    
-    // Start all configured slots
+
+    if configs.is_empty() {
+        println!("\nNothing to start.");
+        let _ = session.disconnect().await;
+        return Ok(());
+    }
+
     println!("\nStarting charge...");
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::StartAll);
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Charge started with {}mA initial current", initial_current);
-    println!("\nNote: Run 'charger-cli monitor' to watch progress and see current adjustment");
-    
+    session.start_slots(&configs, running_mask(&statuses)).await?;
+    println!(
+        "  ✓ Charge started on {} slot(s) with {}mA initial current",
+        configs.len(),
+        initial_current
+    );
+    println!("\nNote: Run 'charger-cli monitor' to watch progress");
+
+    let _ = session.disconnect().await;
     Ok(())
 }
 
+/// One monitor line: `[12:00:00] S1: ⚡ 3.55V 1505mA  S2: ...`.
+fn monitor_line(session: &Session) -> String {
+    let mut line = format!("[{}] ", chrono::Local::now().format("%H:%M:%S"));
+    for slot in 1..=4u8 {
+        match session.latest_status(slot) {
+            Some((status, _)) if status.voltage_mv > 0 => line.push_str(&format!(
+                "S{}: {} {:.2}V {}mA  ",
+                slot,
+                state_symbol(&status.state),
+                status.voltage_mv as f32 / 1000.0,
+                status.current_ma
+            )),
+            Some(_) => line.push_str(&format!("S{}: ·  ", slot)),
+            None => line.push_str(&format!("S{}: -  ", slot)),
+        }
+    }
+    line
+}
+
+/// Automatic reconnect attempts after the link is lost.
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
 async fn run_monitor(verbose: bool, interval: u64) -> Result<(), Box<dyn Error>> {
-    let (protocol, peripheral) = connect_to_device_readonly(verbose).await?;
-    
+    let mut session = connect(verbose, ConnectMode::Monitor).await?;
+
     println!("=== Continuous Monitoring ===");
     println!("Press Ctrl+C to stop\n");
-    
+
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-    
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
         println!("\nStopping monitor...");
-    }).ok();
-    
-    // Set up notification listener with slot status storage
-    use std::sync::Mutex;
-    use std::collections::HashMap;
-    
-    let slot_status: Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>> = 
-        Arc::new(Mutex::new(HashMap::new()));
-    let slot_status_clone = slot_status.clone();
-    
-    let peripheral_clone = peripheral.clone();
-    tokio::spawn(async move {
-        if let Ok(mut stream) = peripheral_clone.notifications().await {
-            while let Some(notification) = stream.next().await {
-                let data = &notification.value;
-                // Parse slot status from notification
-                if data.len() >= 10 && data[0] == 0x0F && data[2] == 0x91 {
-                    if let Ok(status) = mc5000_protocol::MC5000SlotStatus::parse_from_response(data) {
-                        let slot_id = match data[3] {
-                            0x01 => 1,
-                            0x02 => 2,
-                            0x04 => 3,
-                            0x08 => 4,
-                            _ => 0,
-                        };
-                        if slot_id > 0 {
-                            if let Ok(mut map) = slot_status_clone.lock() {
-                                map.insert(slot_id, status);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-    
-    // Give notification handler time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    
-    let mut last_print = std::time::Instant::now();
-    
+    })
+    .ok();
+
+    let interval = Duration::from_secs(interval.max(1));
+    let mut events = session.subscribe();
+    session.start_polling(interval);
+
+    // Let the first polling round complete before the first line.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut next_print = Instant::now();
+
     while running.load(Ordering::SeqCst) {
-        // Request status for all slots periodically
-        if last_print.elapsed() >= Duration::from_secs(interval) {
-            // Request status for each slot
-            for slot in 1..=4u8 {
-                let _ = protocol.request_slot_status(slot).await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            
-            // Wait a bit for responses
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            
-            // Print status from collected data
-            let now = chrono::Local::now().format("%H:%M:%S");
-            print!("[{}] ", now);
-            
-            if let Ok(map) = slot_status.lock() {
-                for slot in 1..=4u8 {
-                    if let Some(status) = map.get(&slot) {
-                        let symbol = state_symbol(&status.state);
-                        let voltage = status.voltage_mv as f32 / 1000.0;
-                        let current = status.current_ma;
-                        
-                        if status.voltage_mv > 0 {
-                            print!("S{}: {} {:.2}V {}mA  ", slot, symbol, voltage, current);
-                        } else {
-                            print!("S{}: ·  ", slot);
-                        }
-                    } else {
-                        print!("S{}: -  ", slot);
-                    }
+        loop {
+            use tokio::sync::broadcast::error::TryRecvError;
+            match events.try_recv() {
+                Ok(SessionEvent::Disconnected) | Err(TryRecvError::Closed) => {
+                    println!("Connection to the charger was lost; reconnecting...");
+                    session = reconnect(verbose, &running).await?;
+                    events = session.subscribe();
+                    session.start_polling(interval);
+                    break;
                 }
+                Ok(SessionEvent::Frame(_)) | Err(TryRecvError::Lagged(_)) => {}
+                Err(TryRecvError::Empty) => break,
             }
-            println!();
-            
-            last_print = std::time::Instant::now();
         }
-        
+        if Instant::now() >= next_print {
+            println!("{}", monitor_line(&session));
+            next_print += interval;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    
+
+    let _ = session.disconnect().await;
     Ok(())
+}
+
+/// Reconnects (read-only) after a lost link, with growing delays between attempts.
+async fn reconnect(verbose: bool, running: &AtomicBool) -> Result<Session, Box<dyn Error>> {
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        if !running.load(Ordering::SeqCst) {
+            return Err("Stopped while reconnecting".into());
+        }
+        // First attempt at once; then 2 s, 4 s, ...
+        tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt - 1))).await;
+        match connect(verbose, ConnectMode::Monitor).await {
+            Ok(session) => return Ok(session),
+            Err(e) => {
+                println!("Reconnect attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed: {e}");
+                last_error = e.to_string();
+            }
+        }
+    }
+    Err(format!("Connection to the charger was lost; reconnecting failed: {last_error}").into())
 }
 
 fn format_time(seconds: u16) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let secs = seconds % 60;
-    
+
     if hours > 0 {
         format!("{}:{:02}:{:02}", hours, minutes, secs)
     } else {
@@ -954,686 +792,150 @@ fn format_time(seconds: u16) -> String {
     }
 }
 
+/// Prints one received frame with a byte-level breakdown.
+fn print_frame(frame: &mc5000_protocol::Frame) {
+    let data = frame.bytes();
+    let now = chrono::Local::now().format("%H:%M:%S%.3f");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("[{}] FRAME ({} bytes)", now, data.len());
+    println!("RAW: {:02X?}", data);
+    println!("HEADER: start=0x0F len={} cmd=0x{:02X}", data[1], data[2]);
+
+    match frame.command() {
+        0x06 => println!("TYPE: Greeting (unsolicited)"),
+        0x57 => {
+            println!("TYPE: Device Info Response");
+            if data.len() >= 22 {
+                println!("  Serial: {}", String::from_utf8_lossy(&data[4..11]));
+                println!("  FW: {}.{}", data[16], data[17]);
+                println!("  HW: {}.{}", data[18], data[19]);
+            }
+        }
+        0x74 => println!("TYPE: Version Info"),
+        0x65 => println!("TYPE: Settings"),
+        0xFE => println!("TYPE: Slot Query (0xFE)"),
+        0x91 => {
+            println!("TYPE: Slot Status (0x91)");
+            for (i, byte) in data.iter().enumerate().skip(3) {
+                println!("  [{:2}] 0x{:02X} ({})", i, byte, byte);
+            }
+            match frame.status() {
+                Some(s) => println!(
+                    "DECODED: slot {} {:?} phase={:?} mode={} {:.3}V {}mA {}mAh {}s R={}mΩ",
+                    s.slot_id,
+                    s.state,
+                    s.phase,
+                    mode_name(&s),
+                    s.voltage_mv as f32 / 1000.0,
+                    s.current_ma,
+                    s.capacity_mah,
+                    s.elapsed_seconds,
+                    s.resistance_milliohm
+                ),
+                None => println!("DECODED: unknown slot"),
+            }
+        }
+        0x93 => {
+            println!("TYPE: Start/Stop ACK");
+            if data.len() >= 4 {
+                println!("  action = 0x{:02X}", data[3]);
+            }
+        }
+        0x94 => {
+            println!("TYPE: Config ACK");
+            if data.len() >= 5 {
+                println!("  channel = 0x{:02X}", data[3]);
+                println!(
+                    "  status  = {} ({})",
+                    data[4],
+                    if data[4] == 1 { "ACCEPTED" } else { "REJECTED" }
+                );
+            }
+        }
+        cmd => println!("TYPE: Unknown command 0x{:02X}", cmd),
+    }
+    println!();
+}
+
 /// Debug command to test BLE communication - Protocol Validation Mode
 async fn run_debug(verbose: bool, duration: u64) -> Result<(), Box<dyn Error>> {
-    let (protocol, peripheral) = connect_to_device_readonly(verbose).await?;
-    
+    let session = connect(verbose, ConnectMode::Monitor).await?;
+
     println!("=== Protocol Validation Mode ===");
     println!("Listening for {} seconds...\n", duration);
-    
-    // Spawn notification listener with detailed decoding
-    let peripheral_clone = peripheral.clone();
-    let notifications_received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let notifications_received_clone = notifications_received.clone();
-    
-    let notifications_task = tokio::spawn(async move {
-        if let Ok(mut stream) = peripheral_clone.notifications().await {
-            while let Some(notification) = stream.next().await {
-                notifications_received_clone.fetch_add(1, Ordering::SeqCst);
-                let now = chrono::Local::now().format("%H:%M:%S%.3f");
-                let data = &notification.value;
-                
-                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                println!("[{}] NOTIFY ({} bytes)", now, data.len());
-                println!("RAW: {:02X?}", data);
-                
-                if data.len() >= 3 && data[0] == 0x0F {
-                    let len = data[1];
-                    let cmd = data[2];
-                    println!("HEADER: start=0x0F len={} cmd=0x{:02X}", len, cmd);
-                    
-                    match cmd {
-                        0x06 => {
-                            println!("TYPE: Greeting (unsolicited)");
-                        }
-                        0x57 => {
-                            println!("TYPE: Device Info Response");
-                            if data.len() >= 22 {
-                                let serial = String::from_utf8_lossy(&data[4..11]);
-                                println!("  Serial: {}", serial);
-                                println!("  FW: {}.{}", data[16], data[17]);
-                                println!("  HW: {}.{}", data[18], data[19]);
-                            }
-                        }
-                        0x91 => {
-                            println!("TYPE: Slot Status (0x91)");
-                            if data.len() >= 23 {
-                                let channel = data[3];
-                                let slot = match channel { 0x01=>1, 0x02=>2, 0x04=>3, 0x08=>4, _=>0 };
-                                println!("SLOT {} (channel=0x{:02X})", slot, channel);
-                                println!("────────────────────────────────────────");
-                                println!("  [4]  status_byte = 0x{:02X}", data[4]);
-                                println!("  [5]  byte5       = {} (0x{:02X})", data[5], data[5]);
-                                let voltage = u16::from_be_bytes([data[6], data[7]]);
-                                println!("  [6-7] voltage    = {} mV ({:.3}V)", voltage, voltage as f32/1000.0);
-                                println!("  [8]  byte8       = 0x{:02X}", data[8]);
-                                println!("  [9]  byte9       = 0x{:02X}", data[9]);
-                                let cap_short = u16::from_be_bytes([data[10], data[11]]);
-                                println!("  [10-11] cap_short = {} mAh", cap_short);
-                                println!("  [12] byte12      = 0x{:02X}", data[12]);
-                                println!("  [13] byte13      = 0x{:02X}", data[13]);
-                                let elapsed = u16::from_be_bytes([data[14], data[15]]);
-                                println!("  [14-15] elapsed  = {} s ({:.1} min)", elapsed, elapsed as f32/60.0);
-                                let resistance = u16::from_be_bytes([data[16], data[17]]);
-                                println!("  [16-17] resistance = {} mΩ", resistance);
-                                println!("  [18] deltav      = {} mV", data[18]);
-                                println!("  [19] byte19      = 0x{:02X}", data[19]);
-                                println!("  [20] byte20      = 0x{:02X}", data[20]);
-                                println!("  [21] byte21      = 0x{:02X}", data[21]);
-                                println!("  [22] checksum    = 0x{:02X}", data[22]);
-                                
-                                // Interpretation
-                                let current_ma = match data[4] {
-                                    0x07 => (data[5] as u16) * 10, // Discharge uses ~10x multiplier
-                                    _ => (data[5] as u16) * 4,
-                                };
-                                let state_str = match data[4] {
-                                    0x00 if voltage == 0 => "Empty",
-                                    0x00 if data[5] > 0 => "Charging (NiMH style)",
-                                    0x00 => "Idle",
-                                    0x01 => "Charging CC",
-                                    0x02 => "Charging CV",
-                                    0x03 => "Charging",
-                                    0x04 => "Completed",
-                                    0x05 => "Charging CV/Trickle",
-                                    0x06 => "Charging (alt)",
-                                    0x07 => "Discharging",
-                                    0x09 => "Paused",
-                                    _ => "Unknown",
-                                };
-                                println!("INTERPRETED: {} @ {}mA", state_str, current_ma);
-                            }
-                        }
-                        0x93 => {
-                            println!("TYPE: Start/Stop ACK");
-                            if data.len() >= 4 {
-                                println!("  action = 0x{:02X}", data[3]);
-                            }
-                        }
-                        0x94 => {
-                            println!("TYPE: Config ACK");
-                            if data.len() >= 5 {
-                                println!("  channel = 0x{:02X}", data[3]);
-                                println!("  status  = {} ({})", data[4], 
-                                    if data[4] == 1 { "ACCEPTED" } else { "REJECTED" });
-                            }
-                        }
-                        _ => {
-                            println!("TYPE: Unknown command 0x{:02X}", cmd);
-                        }
-                    }
+
+    let frames_received = Arc::new(AtomicUsize::new(0));
+    let counter = frames_received.clone();
+    let mut events = session.subscribe();
+    let printer = tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match events.recv().await {
+                Ok(SessionEvent::Frame(frame)) => {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    print_frame(&frame);
                 }
-                println!();
+                Ok(SessionEvent::Disconnected) | Err(RecvError::Closed) => {
+                    println!("Charger disconnected.");
+                    break;
+                }
+                Err(RecvError::Lagged(missed)) => println!("(missed {} frames)", missed),
             }
         }
     });
-    
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    
-    // Request status for all slots
+
     println!("Requesting status for all 4 slots...\n");
     for slot in 1..=4u8 {
-        let channel_mask = 1u8 << (slot - 1);
-        let status_cmd = MC5000Protocol::build_channel_status_command(channel_mask);
+        let status_cmd = MC5000Protocol::build_channel_status_command(1 << (slot - 1));
         println!(">>> Slot {} request: {:02X?}", slot, status_cmd);
-        protocol.send_command(&status_cmd).await?;
+        session.request_status(slot).await?;
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    
+
     let remaining = duration.saturating_sub(2);
     println!("\nWaiting {} more seconds...\n", remaining);
     tokio::time::sleep(Duration::from_secs(remaining)).await;
-    
-    let count = notifications_received.load(Ordering::SeqCst);
+
+    printer.abort();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Session complete. {} notifications received.", count);
-    notifications_task.abort();
-    
+    println!(
+        "Session complete. {} frames received.",
+        frames_received.load(Ordering::SeqCst)
+    );
+    let _ = session.disconnect().await;
     Ok(())
 }
 
-/// Protocol 3 test: replicate capture 3 sequence in a single BLE session.
-/// Sends all 3 configs then a combined start, matching the official app's behaviour.
-async fn run_proto3(verbose: bool) -> Result<(), Box<dyn Error>> {
-    let (protocol, _peripheral) = connect_to_device(verbose).await?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    println!("=== Protocol 3 Test ===");
-    println!("  Slot 1: Cycle D→C, Li-Ion, 2A");
-    println!("  Slot 2: Charge, Li-Ion, 1A, 5000mAh");
-    println!("  Slot 4: Break-in, NiMH, 0.3A");
-    println!();
-
-    // Send configs first, then a combined start at the end.
-
-    // 1) Send config for slot 4: break-in (NiMH, 300mA)
-    let breakin_cfg = ChargeConfig::break_in(4, BatteryChemistry::NiMH, 3000, 300);
-    let breakin_cmd = MC5000Protocol::build_charge_config_command(&breakin_cfg);
-    println!("Sending break-in config (slot 4)...");
-    if verbose { println!("  Packet: {:02X?}", breakin_cmd); }
-    protocol.send_command(&breakin_cmd).await?;
-    println!("  ✓ Break-in config sent");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // 2) Send config for slot 1: cycle D→C (Li-Ion, 2000mA)
-    let cycle_cfg = ChargeConfig::cycle(1, BatteryChemistry::LiIon, 3000, 2000);
-    let cycle_cmd = MC5000Protocol::build_charge_config_command(&cycle_cfg);
-    println!("Sending cycle config (slot 1)...");
-    if verbose { println!("  Packet: {:02X?}", cycle_cmd); }
-    protocol.send_command(&cycle_cmd).await?;
-    println!("  ✓ Cycle config sent");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // 3) Send config for slot 2: charge (Li-Ion, 1000mA, 5000mAh)
-    let charge_cfg = ChargeConfig::new(2, BatteryChemistry::LiIon, OperationMode::Charge, 5000, 1000);
-    let charge_cmd = MC5000Protocol::build_charge_config_command(&charge_cfg);
-    println!("Sending charge config (slot 2)...");
-    if verbose { println!("  Packet: {:02X?}", charge_cmd); }
-    protocol.send_command(&charge_cmd).await?;
-    println!("  ✓ Charge config sent");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // 4) Send combined start for all 3 slots
-    let start_mask: u8 = 0x01 | 0x02 | 0x08; // slots 1, 2, 4
-    let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(start_mask));
-    println!("Sending start-all (mask=0x{:02X})...", start_mask);
-    if verbose { println!("  Packet: {:02X?}", start_cmd); }
-    protocol.send_command(&start_cmd).await?;
-    println!("  ✓ Start-all sent");
-
-    println!();
-    println!("Keeping connection alive with status polling (15s)...\n");
-
-    // Set up notification listener to collect status responses
-    use std::sync::Mutex;
-    use std::collections::HashMap;
-    
-    let slot_status: Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>> = 
-        Arc::new(Mutex::new(HashMap::new()));
-    let slot_status_clone = slot_status.clone();
-    let _verbose_clone = verbose;
-    
-    let peripheral_clone = _peripheral.clone();
-    let notification_task = tokio::spawn(async move {
-        if let Ok(mut stream) = peripheral_clone.notifications().await {
-            while let Some(notification) = stream.next().await {
-                let data = &notification.value;
-                if data.len() >= 10 && data[0] == 0x0F && data[2] == 0x91 {
-                    if let Ok(status) = mc5000_protocol::MC5000SlotStatus::parse_from_response(data) {
-                        let slot_id = match data[3] {
-                            0x01 => 1, 0x02 => 2, 0x04 => 3, 0x08 => 4, _ => 0,
-                        };
-                        if slot_id > 0 {
-                            if let Ok(mut map) = slot_status_clone.lock() {
-                                map.insert(slot_id, status);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Poll status continuously for 15 seconds (matching capture: ~2s interval)
-    for round in 1..=5 {
-        // Request status for all 4 slots
-        for slot in 1..=4u8 {
-            let channel_mask = 1u8 << (slot - 1);
-            let status_cmd = MC5000Protocol::build_channel_status_command(channel_mask);
-            protocol.send_command(&status_cmd).await?;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-        
-        // Wait for responses
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        
-        // Display current status
-        println!("--- Poll #{} ---", round);
-        if let Ok(map) = slot_status.lock() {
-            for &s in &[1u8, 2, 3, 4] {
-                if let Some(status) = map.get(&s) {
-                    println!("  Slot {}: {:?} {:.3}V {}mA {}mAh {}s",
-                        s, status.state,
-                        status.voltage_mv as f32 / 1000.0,
-                        status.current_ma,
-                        status.capacity_mah,
-                        status.elapsed_seconds);
-                }
-            }
-        }
-        println!();
-        
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    fn status(slot: u8, current_ma: u16) -> Option<MC5000SlotStatus> {
+        Some(MC5000SlotStatus {
+            slot_id: slot,
+            state: if current_ma > 0 { MC5000SlotState::Charging } else { MC5000SlotState::Idle },
+            voltage_mv: 3700,
+            current_ma,
+            capacity_mah: 0,
+            elapsed_seconds: 0,
+            resistance_milliohm: 0,
+            temperature: 0,
+            phase: Some(if current_ma > 0 { 2 } else { 0 }),
+            mode: None,
+            chemistry: None,
+        })
     }
 
-    // Now send stop
-    println!("Sending stop-all...");
-    let stop_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::StopAll);
-    protocol.send_command(&stop_cmd).await?;
-    println!("  ✓ Stop-all sent");
-    
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    
-    // Final status check
-    for slot in 1..=4u8 {
-        let channel_mask = 1u8 << (slot - 1);
-        let status_cmd = MC5000Protocol::build_channel_status_command(channel_mask);
-        protocol.send_command(&status_cmd).await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    println!("\n--- Final Status (after stop) ---");
-    if let Ok(map) = slot_status.lock() {
-        for &s in &[1u8, 2, 3, 4] {
-            if let Some(status) = map.get(&s) {
-                println!("  Slot {}: {:?} {:.3}V {}mA {}mAh {}s",
-                    s, status.state,
-                    status.voltage_mv as f32 / 1000.0,
-                    status.current_ma,
-                    status.capacity_mah,
-                    status.elapsed_seconds);
-            }
-        }
-    }
-    
-    notification_task.abort();
-    println!("\nProto3 test complete.");
-    Ok(())
-}
-
-/// Reproduce the capture 4 action sequence from protocol 4.md
-///
-/// Battery configuration (must match for meaningful comparison):
-/// - Slot 1: NiMH battery
-/// - Slot 2: NiMH battery
-/// - Slot 3: Li-Ion battery
-/// - Slot 4: Li-Ion battery
-///
-/// Capture analysis shows the Android app:
-/// 1. Maintains CONTINUOUS round-robin status polling (all 4 slots) throughout
-/// 2. Uses ONLY 0x00 (stop all), 0x01 (start), 0x03 (start all) for start/stop
-/// 3. Sends CONFIG while charging is active (no stop needed to reconfigure a slot)
-/// 4. Has ~10-15s of polling between control commands
-///
-/// Sequence from capture:
-/// 1. START_ALL (0x03) — Li-Ion charge applied to all slots
-/// 2. CONFIG slot 4 (storage) — update on-the-fly  
-/// 3. STOP_ALL (0x00)
-/// 4. CONFIG slot 1 (NiMH) → START (0x01) → CONFIG slot 2 (NiCd)
-///
-/// 5-10. Further configs and starts for LiFePO4, LiHV, RAM, etc.
-async fn run_proto4(verbose: bool, dry_run: bool) -> Result<(), Box<dyn Error>> {
-    use std::sync::Mutex;
-    use std::collections::HashMap;
-    
-    println!("=== Protocol 4 Reproduction ===");
-    println!("Expected battery layout:");
-    println!("  Slot 1: NiMH");
-    println!("  Slot 2: NiMH");
-    println!("  Slot 3: Li-Ion");
-    println!("  Slot 4: Li-Ion");
-    println!();
-
-    // Connect (or skip in dry-run mode)
-    let protocol;
-    let _peripheral;
-    let slot_status: Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>> = 
-        Arc::new(Mutex::new(HashMap::new()));
-    let notification_task;
-
-    if dry_run {
-        println!("[DRY RUN] Skipping device connection, building packets only.\n");
-        protocol = MC5000Protocol::new();
-        _peripheral = None;
-        notification_task = None;
-    } else {
-        let (proto, periph) = connect_to_device(verbose).await?;
-        
-        // Set up notification listener
-        let slot_status_clone = slot_status.clone();
-        let periph_clone = periph.clone();
-        let ntask = tokio::spawn(async move {
-            if let Ok(mut stream) = periph_clone.notifications().await {
-                while let Some(notification) = stream.next().await {
-                    let data = &notification.value;
-                    if data.len() >= 10 && data[0] == 0x0F && data[2] == 0x91 {
-                        if let Ok(status) = mc5000_protocol::MC5000SlotStatus::parse_from_response(data) {
-                            let slot_id = match data[3] {
-                                0x01 => 1, 0x02 => 2, 0x04 => 3, 0x08 => 4, _ => 0,
-                            };
-                            if slot_id > 0 {
-                                if let Ok(mut map) = slot_status_clone.lock() {
-                                    map.insert(slot_id, status);
-                                }
-                            }
-                        }
-                    }
-                    // Also display ACKs for config commands
-                    if data.len() >= 6 && data[0] == 0x0F && data[2] == 0x94 {
-                        println!("  RX ACK: {:02X?} (channel=0x{:02X}, status=0x{:02X})",
-                            data, data[3], data[4]);
-                    }
-                }
-            }
-        });
-        
-        protocol = proto;
-        _peripheral = Some(periph);
-        notification_task = Some(ntask);
+    #[test]
+    fn running_mask_counts_only_slots_with_current() {
+        let statuses = [status(1, 500), status(2, 0), None, status(4, 1200)];
+        assert_eq!(running_mask(&statuses), 0b1001);
     }
 
-    /// Do one round of status polling for all 4 slots (matches capture's round-robin pattern)
-    async fn poll_round(
-        protocol: &MC5000Protocol,
-        dry_run: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        if dry_run { return Ok(()); }
-        for slot in [0x01u8, 0x02, 0x04, 0x08] {
-            let cmd = MC5000Protocol::build_channel_status_command(slot);
-            protocol.send_command(&cmd).await?;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        Ok(())
+    #[test]
+    fn selected_slots_validates_range() {
+        assert_eq!(selected_slots(None).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(selected_slots(Some(3)).unwrap(), vec![3]);
+        assert!(selected_slots(Some(5)).is_err());
     }
-
-    /// Send a command with proper polling context (simulating the capture's continuous polling)
-    /// Does N rounds of round-robin polling before and after the command.
-    async fn send_with_polling(
-        protocol: &MC5000Protocol,
-        cmd: &[u8],
-        rounds_before: usize,
-        rounds_after: usize,
-        dry_run: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        if dry_run {
-            println!("  TX: {:02X?}", cmd);
-            return Ok(());
-        }
-        for _ in 0..rounds_before {
-            poll_round(protocol, false).await?;
-        }
-        protocol.send_command(cmd).await?;
-        for _ in 0..rounds_after {
-            poll_round(protocol, false).await?;
-        }
-        Ok(())
-    }
-
-    /// Display current status snapshot
-    fn display_status(
-        slot_status: &Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>>,
-        label: &str,
-    ) {
-        println!("--- Status: {} ---", label);
-        if let Ok(map) = slot_status.lock() {
-            for &s in &[1u8, 2, 3, 4] {
-                if let Some(status) = map.get(&s) {
-                    println!("    Slot {}: {:?} {:.3}V {}mA {}mAh R={}mΩ {}s",
-                        s, status.state,
-                        status.voltage_mv as f32 / 1000.0,
-                        status.current_ma,
-                        status.capacity_mah,
-                        status.resistance_milliohm,
-                        status.elapsed_seconds);
-                }
-            }
-        }
-        println!();
-    }
-
-    /// Do several rounds of polling and display status
-    async fn monitor_period(
-        protocol: &MC5000Protocol,
-        slot_status: &Arc<Mutex<HashMap<u8, mc5000_protocol::MC5000SlotStatus>>>,
-        dry_run: bool,
-        rounds: usize,
-        label: &str,
-    ) -> Result<(), Box<dyn Error>> {
-        if dry_run { return Ok(()); }
-        for _ in 0..rounds {
-            poll_round(protocol, false).await?;
-        }
-        display_status(slot_status, label);
-        Ok(())
-    }
-
-    /// Stop all charging by sending init sequence (0x74 + 0x65 + 0xFE).
-    /// CRITICAL DISCOVERY: 0x93 0x00 (stop-all) is silently IGNORED in-session.
-    /// The 0xFE query command acts as a device reset that stops all operations.
-    /// The init sequence reliably stops charging in any session state.
-    async fn stop_all_via_init(
-        protocol: &MC5000Protocol,
-        dry_run: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        if dry_run {
-            println!("  TX init sequence (0x74 + 0x65 + 0xFE) → stop all");
-            return Ok(());
-        }
-        // Send init sequence: version(0x74) + settings(0x65) + FE query(0xFE)
-        // The 0xFE command resets the device and stops all charging operations.
-        protocol.send_init_sequence().await?;
-        println!("  ✓ Init sequence sent (device reset/stop)");
-        Ok(())
-    }
-
-    // ── Initial monitoring (matches capture: ~6 rounds of polling before first command) ──
-    if !dry_run {
-        println!("Initial monitoring...");
-        monitor_period(&protocol, &slot_status, false, 6, "Initial").await?;
-    }
-
-    // ========== PHASE 1: Li-Ion charge applied to all slots ==========
-    // Capture: START_STOP 0x03 sent BEFORE config (no config needed for "apply to all")
-    // Then CONFIG for slot 4 storage comes later.
-    // Here we send config first (matching the fact that app has a config screen),
-    // then START ALL (0x03).
-    println!("━━━ Phase 1: Li-Ion charge → ALL SLOTS (300mA, 5000mAh, 4.2V) ━━━");
-    println!("  Expected: Slots 3-4 start charging; Slots 1-2 Battery Type Error");
-    {
-        let mut config = ChargeConfig::new(1, BatteryChemistry::LiIon, OperationMode::Charge, 5000, 300)
-            .for_all_slots();
-        config.discharge_current_ma = 2000;
-        let config_cmd = MC5000Protocol::build_charge_config_command(&config);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Li-Ion charge config → all slots");
-    }
-    {
-        // START ALL (0x03) — matches capture exactly
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::StartAll);
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start ALL (0x03)");
-    }
-    // Monitor for ~10s (matches capture's ~14s of polling between phase 1 and phase 2)
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 1 start").await?;
-
-    // ========== PHASE 2: Config slot 4 for storage (while charging, like capture) ==========
-    // Capture: CONFIG 0x08 sent while Li-Ion charge is active → then STOP ALL → then monitoring
-    println!("━━━ Phase 2: Config slot 4 → Li-Ion Storage (1A/1.5A, timer 120min) ━━━");
-    {
-        let mut storage_cfg = ChargeConfig::liion_storage(4, 5000, 3800, 1000, 1500);
-        storage_cfg.cutoff_timer_min = 120;
-        let config_cmd = MC5000Protocol::build_charge_config_command(&storage_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        // CONFIG sent while charging — matches capture order
-        send_with_polling(&protocol, &config_cmd, 2, 3, dry_run).await?;
-        println!("  ✓ Slot 4: Li-Ion storage config (while charging continues)");
-    }
-    // Monitor to observe the config taking effect
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After storage config (charging continues)").await?;
-
-    // STOP ALL — uses init sequence (0x74+0x65+0xFE) instead of 0x93 0x00
-    // because 0x93 0x00 is silently ignored in-session; 0xFE resets the device.
-    stop_all_via_init(&protocol, dry_run).await?;
-    // Monitor to confirm stop — capture shows ~14s of polling here
-    monitor_period(&protocol, &slot_status, dry_run, 10, "After Stop ALL").await?;
-
-    // ========== PHASE 3: Config slot 1 NiMH, start, then config slot 2 NiCd ==========
-    // Capture: CONFIG 0x01 → START 0x01 → CONFIG 0x02 → FE query
-    println!("━━━ Phase 3: Slot 1 NiMH + Slot 2 NiCd cycle ━━━");
-    {
-        let mut nimh_cfg = ChargeConfig::nimh(1, 3000, 300)
-            .with_trickle_charge(50)
-            .with_keep_voltage(1300)
-            .with_cutoff_timer(90);
-        nimh_cfg.discharge_current_ma = 1000;
-        let config_cmd = MC5000Protocol::build_charge_config_command(&nimh_cfg);
-        println!("  TX config slot 1: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 1: NiMH charge (300mA, trickle=50mA, keep=1.3V, timer=90min)");
-    }
-    {
-        // START 0x01 — matches capture exactly
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 3, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After slot 1 NiMH start").await?;
-    {
-        let nicd_cycle_cfg = ChargeConfig::cycle(2, BatteryChemistry::NiCd, 3000, 200);
-        let config_cmd = MC5000Protocol::build_charge_config_command(&nicd_cycle_cfg);
-        println!("  TX config slot 2: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 2: NiCd cycle (200mA)");
-    }
-    // FE query (matches capture)
-    if !dry_run {
-        let fe_cmd = MC5000Protocol::build_fe_query_command();
-        protocol.send_command(&fe_cmd).await?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 3 complete").await?;
-
-    // ========== PHASE 4: Stop slot 4 → Storage mode #2 ==========
-    // (Beyond captured data — extrapolating from protocol 4.md description)
-    println!("━━━ Phase 4: Li-Ion Storage #2 (700/800mA, timer 120min) ━━━");
-    {
-        let mut storage2_cfg = ChargeConfig::liion_storage(4, 5000, 3800, 700, 800);
-        storage2_cfg.cutoff_timer_min = 120;
-        let config_cmd = MC5000Protocol::build_charge_config_command(&storage2_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 4: Li-Ion storage (700/800mA, timer=120min)");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 4 storage #2").await?;
-
-    // ========== PHASE 5: Stop slot 1 → NiMH charge #2 ==========
-    println!("━━━ Phase 5: Stop → NiMH charge (400mA) ━━━");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After Stop for Phase 5").await?;
-    {
-        let nimh2_cfg = ChargeConfig::nimh(1, 3000, 400);
-        let config_cmd = MC5000Protocol::build_charge_config_command(&nimh2_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 1: NiMH charge (400mA)");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 5 NiMH #2").await?;
-
-    // ========== PHASE 6: Stop all → LiFePO4 charge slot 4 ==========
-    println!("━━━ Phase 6: Stop ALL → LiFePO4 charge slot 4 (3A, 5000mAh) ━━━");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After Stop for Phase 6").await?;
-    {
-        let lfp_cfg = ChargeConfig::lifepo4(4, 5000, 3000);
-        let config_cmd = MC5000Protocol::build_charge_config_command(&lfp_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 4: LiFePO4 charge (3A, 5000mAh, 3.65V)");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 6 LiFePO4").await?;
-
-    // ========== PHASE 7: LiHV charge slot 4 ==========
-    println!("━━━ Phase 7: Li-Ion HV charge slot 4 (3A, 5000mAh, 4.35V) ━━━");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After Stop for Phase 7").await?;
-    {
-        let lihv_cfg = ChargeConfig::liion_hv(4, 5000, 3000);
-        let config_cmd = MC5000Protocol::build_charge_config_command(&lihv_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 4: Li-Ion HV charge (3A, 5000mAh, 4.35V)");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 7 LiHV").await?;
-
-    // ========== PHASE 8: Li-Ion charge all slots ==========
-    println!("━━━ Phase 8: Li-Ion charge → ALL SLOTS (300mA, 5000mAh, 4.2V) ━━━");
-    println!("  Expected: Slots 1-2 Battery Error, Slots 3-4 charging");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After Stop for Phase 8").await?;
-    {
-        let mut config = ChargeConfig::new(1, BatteryChemistry::LiIon, OperationMode::Charge, 5000, 300)
-            .for_all_slots();
-        config.discharge_current_ma = 2000;
-        let config_cmd = MC5000Protocol::build_charge_config_command(&config);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Li-Ion charge config → all slots");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::StartAll);
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start ALL (0x03)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 8 Li-Ion all").await?;
-
-    // ========== PHASE 9: Stop slot 4 → RAM charge ==========
-    println!("━━━ Phase 9: RAM charge slot 4 (1A, 3000mAh, 1.65V) ━━━");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 5, "After Stop for Phase 9").await?;
-    {
-        let ram_cfg = ChargeConfig::new(4, BatteryChemistry::RAM, OperationMode::Charge, 3000, 1000);
-        let config_cmd = MC5000Protocol::build_charge_config_command(&ram_cfg);
-        println!("  TX config: {:02X?}", config_cmd);
-        send_with_polling(&protocol, &config_cmd, 2, 2, dry_run).await?;
-        println!("  ✓ Slot 4: RAM charge (1A, 3000mAh, 1.65V)");
-    }
-    {
-        let start_cmd = MC5000Protocol::build_start_stop_command(StartStopAction::ChannelMask(0x01));
-        println!("  TX start: {:02X?}", start_cmd);
-        send_with_polling(&protocol, &start_cmd, 1, 2, dry_run).await?;
-        println!("  ✓ Start (0x01)");
-    }
-    monitor_period(&protocol, &slot_status, dry_run, 8, "After Phase 9 RAM charge").await?;
-
-    // ========== PHASE 10: Final stop ==========
-    println!("━━━ Phase 10: Stop all → Final status ━━━");
-    stop_all_via_init(&protocol, dry_run).await?;
-    monitor_period(&protocol, &slot_status, dry_run, 8, "FINAL").await?;
-
-    if let Some(task) = notification_task {
-        task.abort();
-    }
-    
-    println!("Proto4 reproduction complete.");
-    Ok(())
 }

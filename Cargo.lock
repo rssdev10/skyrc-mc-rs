@@ -733,17 +733,12 @@ dependencies = [
 name = "charger-controller-cli"
 version = "0.2.0"
 dependencies = [
- "btleplug",
  "chrono",
  "clap",
  "ctrlc",
  "env_logger",
- "futures",
- "log",
  "mc5000-protocol",
- "serde",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -2566,7 +2561,6 @@ dependencies = [
  "btleplug",
  "futures",
  "log",
- "serde",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
