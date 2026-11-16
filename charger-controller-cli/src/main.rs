@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 #[derive(Parser)]
 #[command(name = "charger-cli")]
 #[command(author = "MC5000 Project")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "Command-line interface for MC5000 battery charger")]
 struct Cli {
     /// Enable verbose output
