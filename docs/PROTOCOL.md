@@ -624,7 +624,7 @@ This session tests break-in, cycle, and stop-all commands with a mixed-chemistry
 
 ### Mode Availability per Chemistry
 
-From app UI analysis (`modes.md`):
+From the charger's menu (`docs/MODES.md`):
 
 | Chemistry | Charge | Storage | Discharge | Cycle | Refresh | Break-In |
 |-----------|--------|---------|-----------|-------|---------|----------|

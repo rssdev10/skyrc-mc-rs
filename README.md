@@ -227,7 +227,7 @@ Rules that follow from this split:
 
 - `docs/PROTOCOL.md` – authoritative BLE protocol reference. Update it together with any change to
   packet encoding or decoding.
-- `modes.md` – operation modes and their parameters per chemistry.
+- `docs/MODES.md` – default settings per chemistry and mode, recorded from the charger's own menu.
 - `docs/GUI_DESIGN.md` – GUI architecture, messages and layout. Update it whenever the GUI changes.
 - `packaging/README.md` – release packaging layout.
 - When README or docs show CLI usage, the argument names must match `charger-controller-cli`
