@@ -109,7 +109,8 @@ Sent by device immediately upon connection.
 - `31 30 30 32 31 33 34` = ASCII serial number "1002134"
 - `04` = Unknown
 - `00 00 00 00` = Padding
-- `01 52` = **Firmware Version**: Major=1, Minor=82 → **FW 1.82**
+- `01 52` = **Firmware Version**: Major=1, Minor=82 → **FW 1.82** (the minor byte is the
+  decimal minor number; the official 1.83 firmware image carries `01 53`)
 - `01 00` = **Hardware Version**: Major=1, Minor=0 → **HW 1.00**
 - `80` = Unknown (device capabilities?)
 - `57` = Checksum

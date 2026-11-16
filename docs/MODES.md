@@ -25,6 +25,10 @@ The GUI's Configure dialog uses the same defaults (`charger-controller/src/confi
 | Discharge | 5000 mAh | — | 2.0 A | cut-off 3.20 V | D 100 mA | timer off |
 | Cycle | 5000 mAh | 3.0 A | 2.0 A | 4.20 V / 3.20 V | C 100 mA, D 100 mA | order C>D, C>D>C or D>C; 1 cycle; rest 10 + 10 min; timer off |
 
+Firmware 1.83 lowered the lowest Li-ion discharge cut-off the charger accepts from 2.90 V to
+2.50 V (SkyRC's release note for 1.83). The 3.20 V default is unchanged. The app does not limit
+the cut-off itself; the charger enforces its own range.
+
 ## Li-Ion HV
 
 | Mode | Capacity | Charge | Discharge | Voltage | Cut-off current | Other |
