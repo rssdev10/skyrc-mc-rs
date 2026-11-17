@@ -582,25 +582,26 @@ impl Session {
 
     /// Configures and starts slots.
     ///
-    /// For each config: FE query, then 0x94 config. Then one 0x93 start whose mask
-    /// contains every configured slot plus `keep_running`: the start command sets the
-    /// complete set of active slots, so slots left out of the mask stop.
+    /// For each config: `FE <slot>` (stops whatever runs there), then the 0x94 config, which
+    /// starts the program when the charger acknowledges it. Then one 0x93 frame with every
+    /// configured slot plus `keep_running`; the official app uses 0x93 only to read a slot's
+    /// program and the charger ignores it, so other slots keep running either way.
+    ///
+    /// Nothing is sent when a config cannot be encoded (a mode its chemistry does not have).
     pub async fn start_slots(
         &self,
         configs: &[ChargeConfig],
         keep_running: u8,
     ) -> Result<(), BluetoothError> {
-        let packets = Self::start_packets(configs, keep_running);
+        let packets = Self::start_packets(configs, keep_running)?;
         self.send_sequence(&packets, COMMAND_GAP).await
     }
 
-    /// Stops the slots in `stop_mask`, one slot at a time: FE query for the slot, then
-    /// 0x93 0x00.
+    /// Stops the slots in `stop_mask`, one slot at a time: `FE <slot>`, then `93 00`.
     ///
-    /// Despite its name, 0x93 0x00 stops only the slot selected by the preceding FE query.
-    /// Measured on a live charger: `FE 02` + `93 00` stopped slot 2 while slot 4 kept
-    /// running with its counters intact; `FE 0A` + `93 00` stopped only slot 2, so a
-    /// multi-slot FE mask cannot be used. Other slots never need a restart.
+    /// `FE <slot>` is the stop (official app; captures). A mask with several bits stops
+    /// only the lowest slot (live), hence one FE per slot. The `93 00` that follows is
+    /// harmless. Other slots keep running.
     pub async fn stop_slots(&self, stop_mask: u8) -> Result<(), BluetoothError> {
         self.send_sequence(&Self::stop_packets(stop_mask), COMMAND_GAP)
             .await
@@ -619,9 +620,12 @@ impl Session {
             .collect()
     }
 
-    fn start_packets(configs: &[ChargeConfig], keep_running: u8) -> Vec<Vec<u8>> {
+    fn start_packets(
+        configs: &[ChargeConfig],
+        keep_running: u8,
+    ) -> Result<Vec<Vec<u8>>, BluetoothError> {
         if configs.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut packets = Vec::with_capacity(configs.len() * 2 + 1);
         let mut start_mask = keep_running;
@@ -629,13 +633,13 @@ impl Session {
             packets.push(MC5000Protocol::build_fe_query_command_for(
                 config.channel_bitmask,
             ));
-            packets.push(MC5000Protocol::build_charge_config_command(config));
+            packets.push(MC5000Protocol::build_charge_config_command(config)?);
             start_mask |= config.channel_bitmask;
         }
         packets.push(MC5000Protocol::build_start_stop_command(
             StartStopAction::ChannelMask(start_mask),
         ));
-        packets
+        Ok(packets)
     }
 
     /// Whether the link is gone. A lost session stays lost: connect a new one.
@@ -795,7 +799,7 @@ mod tests {
 
     #[test]
     fn start_sequence_configures_each_slot_then_starts_the_combined_mask() {
-        let packets = Session::start_packets(&[config(1), config(3)], 0b1000);
+        let packets = Session::start_packets(&[config(1), config(3)], 0b1000).unwrap();
         let commands: Vec<u8> = packets.iter().map(|p| p[2]).collect();
         assert_eq!(commands, vec![0xFE, 0x94, 0xFE, 0x94, 0x93]);
         assert_eq!(packets[0][3], 0x01);
@@ -825,7 +829,15 @@ mod tests {
 
     #[test]
     fn start_sequence_is_empty_without_configs() {
-        assert!(Session::start_packets(&[], 0x0F).is_empty());
+        assert!(Session::start_packets(&[], 0x0F).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_mode_the_chemistry_lacks_sends_nothing() {
+        let (session, writes) = fake_session(0);
+        let bad = ChargeConfig::new(2, BatteryChemistry::NiMH, OperationMode::Storage, 400, 2000);
+        assert!(session.start_slots(&[config(1), bad], 0).await.is_err());
+        assert!(commands(&writes).is_empty(), "no frame may reach the charger");
     }
 
     /// In-memory charger. Records every write; answers each 0x91 request with a status

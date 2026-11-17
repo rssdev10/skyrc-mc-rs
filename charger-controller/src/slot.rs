@@ -13,7 +13,9 @@ pub struct Slot {
     pub current_current: f32,
     pub capacity_mah: u32,
     pub resistance_milliohm: u16,
-    pub elapsed_seconds: u16,
+    pub elapsed_seconds: u32,
+    /// Battery temperature the charger reports (°C); 0 = no reading.
+    pub temperature_c: u16,
     pub start_time: Option<Instant>,
     pub last_update: Option<Instant>,
 }
@@ -155,6 +157,7 @@ impl Slot {
             capacity_mah: 0,
             resistance_milliohm: 0,
             elapsed_seconds: 0,
+            temperature_c: 0,
             start_time: None,
             last_update: None,
         }
@@ -180,6 +183,13 @@ impl Slot {
         self.last_update = None;
         
         log::info!("Stopped task on slot {}", self.id.0);
+    }
+
+    /// Drops the GUI's record of the task after a stop was sent, but keeps the state: the
+    /// slot shows idle only when the charger reports it.
+    pub fn forget_task(&mut self) {
+        self.current_task = None;
+        self.start_time = None;
     }
 
     #[allow(dead_code)]
@@ -212,7 +222,7 @@ impl Slot {
         // Completion is decided by the charger: its status reports the slot as finished.
     }
     
-    pub fn update_full_status(&mut self, voltage: f32, current: f32, capacity: u32, resistance: u16, elapsed: u16) {
+    pub fn update_full_status(&mut self, voltage: f32, current: f32, capacity: u32, resistance: u16, elapsed: u32) {
         self.current_voltage = voltage;
         self.current_current = current;
         self.capacity_mah = capacity;

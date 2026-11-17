@@ -13,7 +13,7 @@ pub struct MeasurementPoint {
     pub state: String,
     pub mode: String,
     pub resistance_milliohm: u16,
-    pub elapsed_seconds: u16,
+    pub elapsed_seconds: u32,
 }
 
 impl MeasurementPoint {
@@ -38,7 +38,7 @@ impl MeasurementPoint {
         state: String,
         mode: String,
         resistance_milliohm: u16,
-        elapsed_seconds: u16,
+        elapsed_seconds: u32,
     ) -> Self {
         Self {
             timestamp: Utc::now(),
@@ -61,7 +61,7 @@ pub struct SlotSecondData {
     pub state: String,
     pub mode: String,
     pub resistance_milliohm: u16,
-    pub elapsed_seconds: u16,
+    pub elapsed_seconds: u32,
     pub sample_count: u32,
 }
 

@@ -107,5 +107,19 @@
   "notice.worn_cell": "电池老化（%{resistance} mΩ）：以 %{current} mA 温和充电。",
   "notice.resistance_too_high": "未充电：%{resistance} mΩ 过高（已损坏或不可充电）。",
   "notice.no_resistance": "未测得内阻；以探测电流充电。",
-  "notice.command_failed": "命令失败：%{error}"
+  "notice.command_failed": "命令失败：%{error}",
+  "notice.charger_error": "充电器报告：%{error}",
+  "charger_error.input_low": "输入电压过低",
+  "charger_error.input_high": "输入电压过高",
+  "charger_error.connection": "连接中断",
+  "charger_error.capacity_limit": "已达容量上限",
+  "charger_error.time_limit": "已达时间上限",
+  "charger_error.internal_temp": "内部温度过高",
+  "charger_error.calibration": "校准失败",
+  "charger_error.resistance": "内阻过高",
+  "charger_error.battery_type": "电池类型错误",
+  "charger_error.overload": "过载保护",
+  "charger_error.reversed": "极性接反",
+  "charger_error.full": "已充满",
+  "charger_error.unknown": "错误 %{code}"
 }

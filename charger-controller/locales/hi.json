@@ -107,5 +107,19 @@
   "notice.worn_cell": "घिसा हुआ सेल (%{resistance} mΩ): %{current} mA पर धीरे चार्ज हो रहा है।",
   "notice.resistance_too_high": "चार्ज नहीं हुआ: %{resistance} mΩ बहुत अधिक है (खराब या रिचार्जेबल नहीं)।",
   "notice.no_resistance": "प्रतिरोध नहीं मापा गया; जाँच करंट पर चार्ज हो रहा है।",
-  "notice.command_failed": "कमांड विफल: %{error}"
+  "notice.command_failed": "कमांड विफल: %{error}",
+  "notice.charger_error": "चार्जर की सूचना: %{error}",
+  "charger_error.input_low": "इनपुट वोल्टेज बहुत कम",
+  "charger_error.input_high": "इनपुट वोल्टेज बहुत अधिक",
+  "charger_error.connection": "कनेक्शन टूट गया",
+  "charger_error.capacity_limit": "क्षमता सीमा पूरी",
+  "charger_error.time_limit": "समय सीमा पूरी",
+  "charger_error.internal_temp": "आंतरिक तापमान बहुत अधिक",
+  "charger_error.calibration": "कैलिब्रेशन विफल",
+  "charger_error.resistance": "आंतरिक प्रतिरोध बहुत अधिक",
+  "charger_error.battery_type": "बैटरी प्रकार त्रुटि",
+  "charger_error.overload": "ओवरलोड सुरक्षा",
+  "charger_error.reversed": "उलटी ध्रुवता",
+  "charger_error.full": "पूरी तरह चार्ज",
+  "charger_error.unknown": "त्रुटि %{code}"
 }

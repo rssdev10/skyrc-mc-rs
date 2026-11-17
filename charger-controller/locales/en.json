@@ -107,5 +107,19 @@
   "notice.worn_cell": "Worn cell (%{resistance} mΩ): charging gently at %{current} mA.",
   "notice.resistance_too_high": "Not charged: %{resistance} mΩ is too high (broken or not rechargeable).",
   "notice.no_resistance": "Resistance not measured; charging at the probe current.",
-  "notice.command_failed": "Command failed: %{error}"
+  "notice.command_failed": "Command failed: %{error}",
+  "notice.charger_error": "Charger reports: %{error}",
+  "charger_error.input_low": "input voltage too low",
+  "charger_error.input_high": "input voltage too high",
+  "charger_error.connection": "connection break",
+  "charger_error.capacity_limit": "capacity limit reached",
+  "charger_error.time_limit": "time limit reached",
+  "charger_error.internal_temp": "internal temperature too high",
+  "charger_error.calibration": "calibration failed",
+  "charger_error.resistance": "internal resistance too high",
+  "charger_error.battery_type": "battery type error",
+  "charger_error.overload": "overload protection",
+  "charger_error.reversed": "reversed polarity",
+  "charger_error.full": "fully charged",
+  "charger_error.unknown": "error %{code}"
 }

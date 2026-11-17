@@ -77,10 +77,24 @@ the affected slots to `Error`.
   cannot hide it. Headless snapshots carry it as `notice`.
   Detection only commits where voltage is unambiguous (≥ 3.7 V Li-Ion, < 1.5 V NiMH) and never
   picks Li-Ion HV; other cells are skipped. Rules and thresholds: `src/auto_charge.rs`.
+- When the charger reports an error code for a slot (status byte 20, e.g. "battery type error",
+  "fully charged"), the slot's notice becomes "Charger reports: …". A new code replaces the
+  notice; when the charger clears the code, that notice goes. Snapshots carry the raw code as
+  `charger_error`.
+- The slot header shows the battery temperature (°C) only when the charger reports one
+  (snapshot field `temperature_c`). Elapsed time reads `mm:ss`, or `h:mm:ss` from one hour on.
+  The charger's "waiting to start" and "resting between stages" phases show as Paused.
 - The Configure dialog refuses Confirm, with the reason shown above its buttons, when the
   slot's measured voltage cannot belong to the chosen chemistry (for example NiMH settings on
   a 4.1 V cell). Completion is reported by the charger, never inferred by the GUI.
 - Configure & Start and Stop buttons are disabled until the device confirms status via notification.
+- Stop never marks a slot idle by itself: the slot keeps its state, with Stop disabled, until the
+  charger's status reports it idle. A stop that cannot be delivered is queued and sent first on
+  the next connection.
+- Closing the window (or `quit` on the control channel) waits up to 20 s for commands still on
+  their way to the charger, so a stop just pressed is delivered before the app disconnects. If
+  a stop still could not be delivered, the app logs an error and emits a `stop_not_delivered`
+  event.
 - After Configure & Start completes, the started slot is auto-selected in the graph.
 
 ### Config Dialog (modal overlay)

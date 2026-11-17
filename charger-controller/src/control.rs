@@ -93,7 +93,11 @@ pub struct SlotSnapshot {
     pub current_ma: f32,
     pub capacity_mah: u32,
     pub resistance_mohm: u16,
-    pub elapsed_s: u16,
+    pub elapsed_s: u32,
+    /// Battery temperature the charger reports (°C); 0 = no reading.
+    pub temperature_c: u16,
+    /// The charger's error code for the slot (status byte 20), when not 0.
+    pub charger_error: Option<u8>,
     pub task: Option<String>,
     pub error: Option<String>,
     /// Message shown on the slot (why Auto/Smart skipped or limited the cell, a failure).

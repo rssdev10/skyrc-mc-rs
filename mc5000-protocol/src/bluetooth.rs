@@ -90,20 +90,19 @@ const MC5000_NOTIFY_CHAR_UUID: &str = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
 // Protocol constants
 const PACKET_START: u8 = 0x0F;
-const CMD_KEEPALIVE: u8 = 0x02;     // Small keep-alive/ack packet (0f 02 02 02)
 const CMD_GREETING: u8 = 0x06;      // Device greeting (unsolicited)
 const CMD_DEVICE_INFO: u8 = 0x57;   // Device handshake / info request
-const CMD_VERSION: u8 = 0x74;       // Version info
+const CMD_VERSION: u8 = 0x74;       // Password verification (default "0000")
 const CMD_CHANNEL_STATUS: u8 = 0x91; // Channel status request
-const CMD_START_STOP: u8 = 0x93;    // Start/stop charging command
-const CMD_CHARGE_CONFIG: u8 = 0x94; // Charging configuration command
-const CMD_SETTINGS: u8 = 0x65;      // Settings
-#[allow(dead_code)]
-const CMD_UNKNOWN_25: u8 = 0x25;    // Large opaque blob (observed once)
-#[allow(dead_code)]
-const CMD_UNKNOWN_EA: u8 = 0xEA;    // Large opaque blob (observed once)
+const CMD_START_STOP: u8 = 0x93;    // Read a slot's stored program (official app); never answered
+const CMD_CHARGE_CONFIG: u8 = 0x94; // Program a slot and start it
+const CMD_SETTINGS: u8 = 0x65;      // Firmware-update-available flag
 
-/// High-level start/stop intent for 0x93 commands
+/// Argument of the 0x93 frame this client sends after its configs and stops.
+///
+/// The official app uses 0x93 only to read a slot's stored program (argument = 0-based slot
+/// index); the charger does not answer it, and starting and stopping are done by 0x94 and
+/// 0xFE. The names below are historical; see docs/PROTOCOL.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartStopAction {
     /// Stop all channels (0x00)
@@ -131,77 +130,63 @@ pub enum OperationMode {
     BreakIn,
 }
 
-impl OperationMode {
-    /// Convert to protocol byte. The byte value depends on chemistry because
-    /// NiMH/NiCd have Break-In and Refresh modes that shift the values.
-    ///
-    /// Li-Ion/LiFePO4: Charge=0x00, Storage=0x01, Discharge=0x02, Cycle=0x03
-    /// NiMH/NiCd:     Charge=0x00, BreakIn=0x02, Discharge=0x03, Cycle=0x04, Refresh=0x05
-    pub fn to_byte_for_chemistry(self, chemistry: BatteryChemistry) -> u8 {
+/// Mode numbering families: the charger numbers the 0x94 mode byte and status byte 19
+/// differently for each family (official app; every captured config and status agrees).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeFamily {
+    /// Li-Ion, Li-Ion HV, LiFePO4, LTO, Na-Ion: Charge, Storage, Discharge, Cycle.
+    Lithium,
+    /// NiMH, NiCd, eneloop: Charge, Refresh, Break-in, Discharge, Cycle.
+    Nickel,
+    /// NiZn and RAM: Charge, Discharge, Cycle.
+    NiZnRam,
+}
+
+impl ModeFamily {
+    fn of(chemistry: BatteryChemistry) -> Self {
         match chemistry {
-            BatteryChemistry::NiMH | BatteryChemistry::NiCd |
-            BatteryChemistry::Eneloop | BatteryChemistry::NiZn => match self {
-                OperationMode::Charge => 0x00,
-                OperationMode::Refresh => 0x01,
-                OperationMode::BreakIn => 0x02,
-                OperationMode::Discharge => 0x03,
-                OperationMode::Cycle => 0x04,
-                OperationMode::Storage => 0x01, // Not typical for NiMH
-            },
-            _ => match self {
-                // Li-Ion, LiFePO4
-                OperationMode::Charge => 0x00,
-                OperationMode::Storage => 0x01,
-                OperationMode::Discharge => 0x02,
-                OperationMode::Cycle => 0x03,
-                OperationMode::BreakIn => 0x02,  // Not available for Li-Ion, fallback
-                OperationMode::Refresh => 0x03,  // Not available for Li-Ion, fallback
-            },
+            BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop => {
+                ModeFamily::Nickel
+            }
+            BatteryChemistry::NiZn | BatteryChemistry::RAM => ModeFamily::NiZnRam,
+            BatteryChemistry::LiIon
+            | BatteryChemistry::LiIonHV
+            | BatteryChemistry::LiFePO4
+            | BatteryChemistry::LTO
+            | BatteryChemistry::NaIon => ModeFamily::Lithium,
         }
     }
 
-    /// Legacy byte conversion (uses Li-Ion mapping for backward compatibility)
-    pub fn to_byte(self) -> u8 {
+    /// The modes in protocol-byte order: index = byte value.
+    fn modes(self) -> &'static [OperationMode] {
+        use OperationMode::*;
         match self {
-            OperationMode::Charge => 0x00,
-            OperationMode::Storage => 0x01,
-            OperationMode::Discharge => 0x02,
-            OperationMode::Cycle => 0x03,
-            OperationMode::Refresh => 0x04,
-            OperationMode::BreakIn => 0x05,
+            ModeFamily::Lithium => &[Charge, Storage, Discharge, Cycle],
+            ModeFamily::Nickel => &[Charge, Refresh, BreakIn, Discharge, Cycle],
+            ModeFamily::NiZnRam => &[Charge, Discharge, Cycle],
         }
     }
+}
 
-    /// Parse operation mode from protocol byte (Li-Ion mapping)
+impl OperationMode {
+    /// The 0x94 mode byte for this mode, or `None` when the chemistry has no such mode
+    /// (for example Storage for NiMH). Numbering per family:
+    ///
+    /// - Li-Ion, Li-Ion HV, LiFePO4, LTO, Na-Ion: Charge 0, Storage 1, Discharge 2, Cycle 3
+    /// - NiMH, NiCd, eneloop: Charge 0, Refresh 1, Break-in 2, Discharge 3, Cycle 4
+    /// - NiZn, RAM: Charge 0, Discharge 1, Cycle 2
+    pub fn to_byte_for_chemistry(self, chemistry: BatteryChemistry) -> Option<u8> {
+        ModeFamily::of(chemistry)
+            .modes()
+            .iter()
+            .position(|&m| m == self)
+            .map(|i| i as u8)
+    }
+
+    /// Parses a mode byte (0x94 byte 4, status byte 19) for the given chemistry.
     /// Inverse of [`OperationMode::to_byte_for_chemistry`].
     pub fn from_byte_for_chemistry(byte: u8, chemistry: BatteryChemistry) -> Option<Self> {
-        let nickel = matches!(
-            chemistry,
-            BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop | BatteryChemistry::NiZn
-        );
-        match (nickel, byte) {
-            (_, 0x00) => Some(OperationMode::Charge),
-            (true, 0x01) => Some(OperationMode::Refresh),
-            (true, 0x02) => Some(OperationMode::BreakIn),
-            (true, 0x03) => Some(OperationMode::Discharge),
-            (true, 0x04) => Some(OperationMode::Cycle),
-            (false, 0x01) => Some(OperationMode::Storage),
-            (false, 0x02) => Some(OperationMode::Discharge),
-            (false, 0x03) => Some(OperationMode::Cycle),
-            _ => None,
-        }
-    }
-
-    pub fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0x00 => Some(OperationMode::Charge),
-            0x01 => Some(OperationMode::Storage),
-            0x02 => Some(OperationMode::Discharge),
-            0x03 => Some(OperationMode::Cycle),
-            0x04 => Some(OperationMode::Refresh),
-            0x05 => Some(OperationMode::BreakIn),
-            _ => None,
-        }
+        ModeFamily::of(chemistry).modes().get(usize::from(byte)).copied()
     }
 
     /// Human-readable name
@@ -455,35 +440,34 @@ impl MC5000Protocol {
         Self::build_packet(CMD_CHANNEL_STATUS, &[channel_bitmask])
     }
 
-    /// Build version request command (0x74)  
+    /// Build the 0x74 password verification with the default password `0000`
+    /// (`00` then one byte per digit). The charger replies `74 01 01` when accepted.
     pub fn build_version_command() -> Vec<u8> {
         Self::build_packet(CMD_VERSION, &[0x00, 0x00, 0x00, 0x00, 0x00])
     }
 
-    /// Build settings query command (0x65)
+    /// Build 0x65 `00 00`: tells the charger that no newer firmware is available (the official
+    /// app sends `00 01` when its update server offers one). The reply is not used.
     pub fn build_settings_command() -> Vec<u8> {
         Self::build_packet(CMD_SETTINGS, &[0x00, 0x00])
     }
 
-    /// Build 0xFE slot query command (per-slot status check, confirmed capture 4)
-    /// channel: slot bitmask (0x01-0x08) or 0x00 for general query
+    /// Build the 0xFE **stop** command for a slot bitmask (0x01-0x08).
+    ///
+    /// The official app's Stop: the charger stops that slot and replies `FE <mask> 01`.
+    /// A mask with several bits stops only the lowest slot; `0x00` stops every slot.
+    /// (Long misnamed a "query"; the name is kept for API stability.)
     pub fn build_fe_query_command_for(channel: u8) -> Vec<u8> {
         Self::build_packet(0xFE, &[channel])
     }
 
-    /// Build 0xFE general query command (channel 0x00).
-    ///
-    /// Warning: on a live charger this stops every running program.
+    /// Build `FE 00`: **stops every running program** on the charger.
     pub fn build_fe_query_command() -> Vec<u8> {
         Self::build_packet(0xFE, &[0x00])
     }
 
-    /// Build start/stop charging command (0x93)
-    ///
-    /// Observed actions:
-    /// - 0x00: stop all channels
-    /// - 0x03: start all channels
-    /// - Bitmask (e.g., 0x02) to act on a single slot when not affecting all
+    /// Build a 0x93 frame. It neither starts nor stops anything (see [`StartStopAction`]);
+    /// the charger does not answer it.
     pub fn build_start_stop_command(action: StartStopAction) -> Vec<u8> {
         let byte = match action {
             StartStopAction::StopAll => 0x00,
@@ -494,26 +478,27 @@ impl MC5000Protocol {
         Self::build_packet(CMD_START_STOP, &[byte])
     }
 
-    /// Build keep-alive/ping command (0x02). Observed as 0f 02 02 02.
-    pub fn build_keepalive_command() -> Vec<u8> {
-        Self::build_packet(CMD_KEEPALIVE, &[])
-    }
-
     /// Build charging configuration command (0x94)
     /// Sets up charging parameters for a slot.
     ///
-    /// Field layout CORRECTED from capture 4 binary analysis.
-    /// Key correction: data[22] is single-byte delta-peak (not 2-byte LE),
-    /// data[23] is trickle/10, data[24-25] is keep voltage BE,
-    /// data[26] is constant 0x3C, data[27-28] is timer BE.
-    pub fn build_charge_config_command(config: &ChargeConfig) -> Vec<u8> {
+    /// The charger starts the program as soon as it acknowledges this frame.
+    ///
+    /// Fails, without building anything, when the chemistry has no such mode (for example
+    /// Storage for NiMH): sending another mode's byte would run a different program.
+    pub fn build_charge_config_command(config: &ChargeConfig) -> Result<Vec<u8>, BluetoothError> {
+        let mode_byte = config.mode.to_byte_for_chemistry(config.chemistry).ok_or_else(|| {
+            BluetoothError::CommunicationError(format!(
+                "{:?} has no {:?} mode",
+                config.chemistry, config.mode
+            ))
+        })?;
         let mut data = Vec::with_capacity(41);
         
         // Byte 0: Channel bitmask (0x01/0x02/0x04/0x08, or 0x00 for all slots)
         data.push(config.channel_bitmask);
         
-        // Byte 1: Mode (chemistry-dependent byte mapping)
-        data.push(config.mode.to_byte_for_chemistry(config.chemistry));
+        // Byte 1: Mode, numbered per chemistry family
+        data.push(mode_byte);
         
         // Bytes 2-3: Charge current (mA, big-endian)
         data.push((config.charge_current_ma >> 8) as u8);
@@ -585,9 +570,8 @@ impl MC5000Protocol {
         data.push((config.keep_voltage_mv >> 8) as u8);
         data.push((config.keep_voltage_mv & 0xFF) as u8);
         
-        // Byte 26: Always 0x3C (= 60 decimal) in all capture 4 configs.
-        //   CORRECTED: Was low byte of LE cutoff_timer in old code. The coincidental value
-        //   60 (0x3C) in simple configs caused misidentification as LE timer.
+        // Byte 26: Battery temperature cut-off (°C). The official app sends the program's
+        //   value (71 when unset); 60 in every captured config, which is what we send.
         data.push(0x3C);
         
         // Bytes 27-28: Cutoff timer (minutes, BIG-endian)
@@ -597,12 +581,12 @@ impl MC5000Protocol {
         data.push((config.cutoff_timer_min >> 8) as u8);
         data.push((config.cutoff_timer_min & 0xFF) as u8);
         
-        // Bytes 29-30: Max time (minutes, BIG-endian)
-        //   No reserved byte between timer and max_time (confirmed from capture 4).
+        // Bytes 29-30: The official app always sends 300 here (its field `inMaxbostCapacity`;
+        //   meaning unconfirmed). Callers pass 300.
         data.push((config.max_time_min >> 8) as u8);
         data.push((config.max_time_min & 0xFF) as u8);
         
-        // Byte 31: Chemistry prefix (always 0x00)
+        // Byte 31: Turbo mode (official app); always 0 in captures
         data.push(0x00);
         
         // Byte 32: Chemistry byte (confirmed series 5 — all 10 chemistries)
@@ -611,11 +595,11 @@ impl MC5000Protocol {
         //   0x08=LTO, 0x09=Na-Ion
         data.push(config.chemistry.to_protocol_byte());
         
-        // Bytes 33-34: Secondary value field (big-endian)
-        //   For lithium chemistries: storage voltage in mV
-        //     Li-Ion=3800, LiHV=3900, LiFePO4=3300 (confirmed capture 4)
-        //   For nickel/alkaline chemistries: 110% of rated capacity in mAh
-        //     3000mAh → 3300 (confirmed captures 3-4)
+        // Bytes 33-34: Storage voltage (mV, big-endian; official app).
+        //   Lithium family: Li-Ion=3800, LiHV=3900, LiFePO4=3300, LTO=2400, Na-Ion=3500.
+        //   Nickel, NiZn and RAM do not use it; the app leaves it at 3300 for every capacity.
+        //   This client sends 110 % of the capacity there, which equals 3300 for the
+        //   3000 mAh default (kept unchanged; the charger ignores it for these chemistries).
         let secondary_value = if config.chemistry.is_nickel_based() {
             (config.capacity_mah as f32 * 1.1) as u16
         } else {
@@ -625,13 +609,13 @@ impl MC5000Protocol {
         data.push((secondary_value >> 8) as u8);
         data.push((secondary_value & 0xFF) as u8);
         
-        // Bytes 35-39: Padding (always zeros in captures, 5 bytes to reach 40 total data bytes)
+        // Byte 35: eneloop sub-type (official app; 0 in captures). Bytes 36-39: unused.
         // Verified: capture packets are 44 bytes total = start(1) + length(1) + cmd(1) + data(40) + checksum(1)
         data.extend([0x00u8; 5]);
         
         debug_assert_eq!(data.len(), 40, "Config data must be exactly 40 bytes");
-        
-        Self::build_packet(CMD_CHARGE_CONFIG, &data)
+
+        Ok(Self::build_packet(CMD_CHARGE_CONFIG, &data))
     }
 
     /// Scan for available Bluetooth devices
@@ -1395,15 +1379,22 @@ impl ChargeConfig {
 
 #[derive(Debug, Clone)]
 pub struct MC5000DeviceInfo {
+    /// e.g. "1.82" (code bytes 11-12: major, minor as a decimal number).
     pub firmware_version: String,
+    /// The official app reads only the low nibble of code byte 13 (e.g. "1"; the charger's
+    /// menu shows 1.0).
     pub hardware_version: String,
+    /// Code bytes 0-5: the ASCII model ID, "100214" for every MC5000. Not a serial number;
+    /// the field name is kept for API stability.
     pub serial_number: String,
     pub slot_count: u8,
 }
 
 impl MC5000DeviceInfo {
     /// Parse device info from 0x57 command response
-    /// Response format: 0f 13 57 00 <serial:7> <??:1> <pad:4> <fw_maj:1> <fw_min:1> <hw_maj:1> <hw_min:1> <??:1> <checksum:1>
+    /// Response: `0f 13 57 00` + 16 code bytes + checksum (21 bytes), e.g.
+    /// `0f 13 57 00 31 30 30 32 31 34 04 00 00 00 00 01 52 01 00 80 57`. Code bytes:
+    /// 0-5 model ID, 8-9 OEM, 11-12 firmware, 13 hardware (low nibble), 15 check byte.
     pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
         // Check minimum length and start marker
         if response.len() < 6 {
@@ -1431,36 +1422,22 @@ impl MC5000DeviceInfo {
                     firmware_version: "Unknown".to_string(),
                     hardware_version: "Unknown".to_string(),
                     serial_number: "Unknown".to_string(),
-                    slot_count: 8,
+                    slot_count: 4,
                 })
             }
             CMD_DEVICE_INFO => {
-                // Device info response: 0f 13 57 00 31 30 30 32 31 33 34 04 00 00 00 00 01 52 01 00 80 57
-                if response.len() < 20 {
+                if response.len() < 21 {
                     return Err(BluetoothError::CommunicationError(
                         format!("Device info response too short: {} bytes", response.len())
                     ));
                 }
-
-                // Parse serial number (ASCII bytes at offset 4-10)
-                let serial_bytes = &response[4..11];
-                let serial_number = String::from_utf8_lossy(serial_bytes).to_string();
-
-                // Firmware version at offset 16-17: major, minor
-                let fw_major = response[16];
-                let fw_minor = response[17];
-                let firmware_version = format!("{}.{:02}", fw_major, fw_minor);
-
-                // Hardware version at offset 18-19: major, minor  
-                let hw_major = response[18];
-                let hw_minor = response[19];
-                let hardware_version = format!("{}.{:02}", hw_major, hw_minor);
-
+                // The 16 code bytes follow `0f 13 57 00`.
+                let code = &response[4..20];
                 Ok(MC5000DeviceInfo {
-                    firmware_version,
-                    hardware_version,
-                    serial_number,
-                    slot_count: 8,
+                    firmware_version: format!("{}.{:02}", code[11], code[12]),
+                    hardware_version: (code[13] & 0x0F).to_string(),
+                    serial_number: String::from_utf8_lossy(&code[0..6]).to_string(),
+                    slot_count: 4,
                 })
             }
             _ => {
@@ -1479,25 +1456,55 @@ pub struct MC5000SlotStatus {
     pub voltage_mv: u16,
     pub current_ma: u16,
     pub capacity_mah: u32,
-    pub elapsed_seconds: u16,
+    /// Bytes 12-15: elapsed time of the program (big-endian u32 in the official app).
+    pub elapsed_seconds: u32,
     pub resistance_milliohm: u16,
-    pub temperature: u8,
-    /// Byte 18: what the slot is doing. Observed: 0 idle, 2 charging, 3 discharging,
-    /// 6 finished. `None` for frames shorter than the 23-byte layout.
+    /// Bytes 8-9: battery temperature in °C according to the official app; 0 = no reading
+    /// (0 in every capture so far).
+    pub temperature_c: u16,
+    /// Byte 18: what the slot is doing (see [`phase`]). `None` for frames shorter than
+    /// the 23-byte layout.
     pub phase: Option<u8>,
     /// Byte 19: the configured program, in the per-chemistry numbering of the 0x94
     /// config. Kept after a stop, so it says what was set up, not that it is running.
     pub mode: Option<OperationMode>,
     /// Byte 21: the configured chemistry (same codes as the 0x94 config).
     pub chemistry: Option<BatteryChemistry>,
+    /// Byte 20: the charger's error code, 0 = none (see [`charger_error_text`]).
+    pub error: Option<u8>,
 }
 
-/// Status byte 18 values observed on a live charger.
+/// Status byte 18 values (official app; 0, 2, 3 and 6 also seen on a live charger).
 pub mod phase {
     pub const IDLE: u8 = 0;
+    /// "Wait…": the program is about to start.
+    pub const WAITING: u8 = 1;
     pub const CHARGING: u8 = 2;
     pub const DISCHARGING: u8 = 3;
+    /// Rest between the stages of a multi-stage program.
+    pub const RESTING: u8 = 4;
+    pub const DONE: u8 = 5;
     pub const FINISHED: u8 = 6;
+}
+
+/// The official app's English text for a status byte 20 error code; `None` for 0 (no
+/// error) and for codes the app does not know. Codes 9, 10 and 13 were seen in captures.
+pub fn charger_error_text(code: u8) -> Option<&'static str> {
+    Some(match code {
+        1 => "Input voltage too low",
+        2 => "Input voltage too high",
+        3 | 9 => "Connection break",
+        4 => "Capacity limit",
+        5 => "Time limit",
+        6 => "Internal temperature too high",
+        7 => "Calibration failed",
+        8 => "High internal resistance",
+        10 => "Battery type error",
+        11 => "Overload protection",
+        12 => "Reversed polarity",
+        13 => "Fully charged",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1567,9 +1574,13 @@ impl MC5000SlotStatus {
             0
         };
 
-        // Elapsed time: bytes 14-15 (big-endian, seconds)
+        // Bytes 8-9: battery temperature (°C, big-endian; official app)
+        let temperature_c = u16::from_be_bytes([response[8], response[9]]);
+
+        // Elapsed time: bytes 12-15 (big-endian u32, seconds; official app). Bytes 12-13
+        // are 0 below 18.2 h, which is why 14-15 alone used to look right.
         let elapsed_seconds = if response.len() >= 16 {
-            u16::from_be_bytes([response[14], response[15]])
+            u32::from_be_bytes([response[12], response[13], response[14], response[15]])
         } else {
             0
         };
@@ -1586,6 +1597,7 @@ impl MC5000SlotStatus {
         // the slot's phase (see `phase`).
         let extended = response.len() >= 23;
         let phase = extended.then(|| response[18]);
+        let error = extended.then(|| response[20]);
         let chemistry = extended
             .then(|| BatteryChemistry::from_protocol_byte(response[21]))
             .flatten();
@@ -1598,9 +1610,10 @@ impl MC5000SlotStatus {
                 Some(phase::IDLE) => MC5000SlotState::Idle,
                 Some(phase::CHARGING) => MC5000SlotState::Charging,
                 Some(phase::DISCHARGING) => MC5000SlotState::Discharging,
-                Some(phase::FINISHED) => MC5000SlotState::Completed,
-                // Unobserved phase values (for example a rest between cycle stages):
-                // fall back to what the current says.
+                Some(phase::DONE | phase::FINISHED) => MC5000SlotState::Completed,
+                // Waiting to start and resting between stages: the program is running.
+                Some(phase::WAITING | phase::RESTING) => MC5000SlotState::Paused,
+                // Unknown phase values: fall back to what the current says.
                 Some(_) if current_ma > 0 => MC5000SlotState::Charging,
                 Some(_) if elapsed_seconds > 0 => MC5000SlotState::Paused,
                 Some(_) => MC5000SlotState::Idle,
@@ -1619,10 +1632,11 @@ impl MC5000SlotStatus {
             capacity_mah,
             elapsed_seconds,
             resistance_milliohm,
-            temperature: 0, // Temperature not available in this protocol response
+            temperature_c,
             phase,
             mode,
             chemistry,
+            error,
         })
     }
 
@@ -1735,19 +1749,165 @@ mod tests {
 
     #[test]
     fn mode_bytes_round_trip_for_each_chemistry_family() {
-        let li = [OperationMode::Charge, OperationMode::Storage, OperationMode::Discharge, OperationMode::Cycle];
-        let ni = [
-            OperationMode::Charge,
-            OperationMode::Refresh,
-            OperationMode::BreakIn,
-            OperationMode::Discharge,
-            OperationMode::Cycle,
+        use OperationMode::*;
+        let families: [(&[BatteryChemistry], &[OperationMode]); 3] = [
+            (
+                &[
+                    BatteryChemistry::LiIon,
+                    BatteryChemistry::LiIonHV,
+                    BatteryChemistry::LiFePO4,
+                    BatteryChemistry::LTO,
+                    BatteryChemistry::NaIon,
+                ],
+                &[Charge, Storage, Discharge, Cycle],
+            ),
+            (
+                &[BatteryChemistry::NiMH, BatteryChemistry::NiCd, BatteryChemistry::Eneloop],
+                &[Charge, Refresh, BreakIn, Discharge, Cycle],
+            ),
+            (&[BatteryChemistry::NiZn, BatteryChemistry::RAM], &[Charge, Discharge, Cycle]),
         ];
-        for (chemistry, modes) in [(BatteryChemistry::LiIon, &li[..]), (BatteryChemistry::NiMH, &ni[..])] {
-            for &mode in modes {
-                let byte = mode.to_byte_for_chemistry(chemistry);
-                assert_eq!(OperationMode::from_byte_for_chemistry(byte, chemistry), Some(mode));
+        let all = [Charge, Storage, Discharge, Cycle, Refresh, BreakIn];
+        for (chemistries, modes) in families {
+            for &chemistry in chemistries {
+                for (byte, &mode) in modes.iter().enumerate() {
+                    assert_eq!(mode.to_byte_for_chemistry(chemistry), Some(byte as u8), "{chemistry:?} {mode:?}");
+                    assert_eq!(OperationMode::from_byte_for_chemistry(byte as u8, chemistry), Some(mode));
+                }
+                for mode in all.iter().filter(|m| !modes.contains(m)) {
+                    assert_eq!(mode.to_byte_for_chemistry(chemistry), None, "{chemistry:?} has no {mode:?}");
+                }
+                assert_eq!(OperationMode::from_byte_for_chemistry(modes.len() as u8, chemistry), None);
             }
+        }
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// NiZn/RAM program on slot 1 with the parameters of the official app's captured frames.
+    fn nizn_ram_config(chemistry: BatteryChemistry, mode: OperationMode) -> ChargeConfig {
+        let (target, cutoff) = match chemistry {
+            BatteryChemistry::NiZn => (1900, 1100),
+            _ => (1650, 900),
+        };
+        ChargeConfig {
+            discharge_current_ma: 1000,
+            target_voltage_mv: target,
+            cutoff_voltage_mv: cutoff,
+            charge_cutoff_current_ma: 100,
+            discharge_cutoff_current_ma: 100,
+            trickle_charge_ma: 0,
+            keep_voltage_mv: 0,
+            delta_peak_mv: 6,
+            cutoff_timer_min: 0,
+            max_time_min: 300,
+            cycle_direction: if chemistry == BatteryChemistry::NiZn && mode == OperationMode::Cycle { 1 } else { 0 },
+            charge_resting_min: 10,
+            discharge_resting_min: 10,
+            cycle_count: if chemistry == BatteryChemistry::NiZn && mode == OperationMode::Cycle { 2 } else { 1 },
+            ..ChargeConfig::new(1, chemistry, mode, 3000, 1000)
+        }
+    }
+
+    /// Frames the official app sent for NiZn and RAM: Discharge is mode 1, Cycle mode 2.
+    #[test]
+    fn nizn_and_ram_configs_match_the_official_app_byte_for_byte() {
+        let captured = [
+            (BatteryChemistry::NiZn, OperationMode::Discharge,
+             "0f2a94010103e803e80bb8076c044c00640064000a000a0100060000003c0000012c00060ce4000000000034"),
+            (BatteryChemistry::NiZn, OperationMode::Cycle,
+             "0f2a94010203e803e80bb8076c044c00640064000a000a0201060000003c0000012c00060ce4000000000037"),
+            (BatteryChemistry::RAM, OperationMode::Discharge,
+             "0f2a94010103e803e80bb80672038400640064000a000a0100060000003c0000012c00070ce4000000000071"),
+            (BatteryChemistry::RAM, OperationMode::Cycle,
+             "0f2a94010203e803e80bb80672038400640064000a000a0100060000003c0000012c00070ce4000000000072"),
+        ];
+        for (chemistry, mode, frame) in captured {
+            let built = MC5000Protocol::build_charge_config_command(&nizn_ram_config(chemistry, mode)).unwrap();
+            assert_eq!(built, hex(frame), "{chemistry:?} {mode:?}");
+        }
+    }
+
+    /// A device-info reply captured from an MC5000 with firmware 1.82.
+    #[test]
+    fn device_info_reply_decodes_model_and_versions() {
+        let info = MC5000DeviceInfo::parse_from_response(&hex(
+            "0f1357003130303231340400000000015201008057",
+        ))
+        .unwrap();
+        assert_eq!(info.serial_number, "100214");
+        assert_eq!(info.firmware_version, "1.82");
+        assert_eq!(info.hardware_version, "1");
+        // The last code byte makes the 16 code bytes sum to 0 mod 256.
+        let frame = hex("0f1357003130303231340400000000015201008057");
+        assert_eq!(frame[4..20].iter().fold(0u8, |a, &b| a.wrapping_add(b)), 0);
+    }
+
+    /// Builds a 23-byte status frame with a valid checksum.
+    fn status_frame(phase: u8, error: u8, temperature: u16, elapsed: u32) -> Vec<u8> {
+        let mut f = vec![0x0F, 0x15, 0x91, 0x01, 0x00, 0x00, 0x05, 0x14];
+        f.extend(temperature.to_be_bytes());
+        f.extend([0x00, 0x10]); // capacity 16 mAh
+        f.extend(elapsed.to_be_bytes());
+        f.extend([0x00, 0x30, phase, 0x00, error, 0x03]); // R, phase, mode, error, NiMH
+        let sum = f[2..].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        f.push(sum);
+        f
+    }
+
+    #[test]
+    fn status_decodes_error_temperature_and_32_bit_elapsed_time() {
+        // Captured: slot 1 holding a NiMH cell after a Li-Ion program was sent to it.
+        let s = parse(&hex("0f159101009505890000000000000000000000000a00bf"));
+        assert_eq!(s.error, Some(10));
+        assert_eq!(charger_error_text(10), Some("Battery type error"));
+        assert_eq!(charger_error_text(0), None);
+
+        let s = parse(&status_frame(phase::CHARGING, 0, 31, 70_000));
+        assert_eq!((s.temperature_c, s.elapsed_seconds, s.error), (31, 70_000, Some(0)));
+    }
+
+    #[test]
+    fn waiting_and_resting_count_as_running_and_done_as_completed() {
+        for (p, state) in [
+            (phase::WAITING, MC5000SlotState::Paused),
+            (phase::RESTING, MC5000SlotState::Paused),
+            (phase::DONE, MC5000SlotState::Completed),
+            (phase::FINISHED, MC5000SlotState::Completed),
+        ] {
+            let s = parse(&status_frame(p, 0, 0, 60));
+            assert_eq!(s.state, state, "phase {p}");
+            assert_eq!(s.is_running(), state == MC5000SlotState::Paused);
+        }
+    }
+
+    #[test]
+    fn a_mode_the_chemistry_lacks_is_refused() {
+        for (chemistry, mode) in [
+            (BatteryChemistry::RAM, OperationMode::Storage),
+            (BatteryChemistry::NiZn, OperationMode::Refresh),
+            (BatteryChemistry::NiMH, OperationMode::Storage),
+            (BatteryChemistry::LiIon, OperationMode::BreakIn),
+        ] {
+            let config = ChargeConfig::new(1, chemistry, mode, 2000, 500);
+            assert!(MC5000Protocol::build_charge_config_command(&config).is_err(), "{chemistry:?} {mode:?}");
+        }
+    }
+
+    /// Status frames the charger sent while running the programs above.
+    #[test]
+    fn nizn_and_ram_status_frames_decode_their_mode() {
+        let cases = [
+            ("0f1591010191043f0000000000000002014703010006bb", BatteryChemistry::NiZn, OperationMode::Discharge, MC5000SlotState::Discharging),
+            ("0f159101000005340000000000000000012e0302000605", BatteryChemistry::NiZn, OperationMode::Cycle, MC5000SlotState::Discharging),
+            ("0f15910102b3038c0000000000000004013b0301000721", BatteryChemistry::RAM, OperationMode::Discharge, MC5000SlotState::Discharging),
+            ("0f159101000005310000000000000001013e0202000713", BatteryChemistry::RAM, OperationMode::Cycle, MC5000SlotState::Charging),
+        ];
+        for (frame, chemistry, mode, state) in cases {
+            let s = parse(&hex(frame));
+            assert_eq!((s.chemistry, s.mode, s.state), (Some(chemistry), Some(mode), state), "{frame}");
         }
     }
 

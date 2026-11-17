@@ -15,11 +15,15 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
         return config_dialog_view(slot, config);
     }
 
+    // Battery temperature, shown only when the charger reports one.
+    let temperature = if slot.temperature_c > 0 { format!("{}°C", slot.temperature_c) } else { String::new() };
     let slot_header = row![
         text(format!("{} {}", t!("label.slot"), slot.id.0 + 1)).size(16),
         iced::widget::space::horizontal(),
+        text(temperature).size(12),
         status_badge(&slot.state),
     ]
+    .spacing(6)
     .align_y(iced::Center);
 
     let measurements = column![
@@ -62,7 +66,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
             .align_x(iced::Center),
             column![
                 text(t!("label.time").to_string()).size(12),
-                text(format!("{:02}:{:02}", slot.elapsed_seconds / 60, slot.elapsed_seconds % 60)).size(14),
+                text(format_elapsed(slot.elapsed_seconds)).size(14),
             ]
             .width(Length::FillPortion(1))
             .align_x(iced::Center),
@@ -309,4 +313,23 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
         .style(container::bordered_box)
         .width(Length::Fill)
         .into()
+}
+
+/// `mm:ss`, or `h:mm:ss` once a program runs an hour or more.
+fn format_elapsed(seconds: u32) -> String {
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn elapsed_time_shows_hours_past_the_old_16_bit_limit() {
+        assert_eq!(super::format_elapsed(125), "02:05");
+        assert_eq!(super::format_elapsed(70_000), "19:26:40");
+    }
 }

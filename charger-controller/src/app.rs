@@ -20,8 +20,12 @@ use crate::config_dialog::{ChargeMode};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum AppMessage {
-    /// UI timer only (elapsed-time display, cooldowns). Never touches the charger.
+    /// UI timer only (elapsed-time display, cooldowns, the quit deadline). Never touches
+    /// the charger.
     Tick,
+    /// Quit (control `quit`, or the window's close button): exits once the commands in
+    /// flight, above all stops, have reached the charger.
+    QuitRequested,
     /// A decoded slot status from the shared session.
     StatusReceived(MC5000SlotStatus),
     DeviceSelected(String),
@@ -138,9 +142,17 @@ pub struct ChargerApp {
     last_device: Option<DiscoveredBluetoothDevice>,
     /// Slots whose stop could not be delivered; sent first after (re)connecting.
     pending_stop: u8,
+    /// Start and stop command sequences sent to the session whose result has not arrived.
+    commands_in_flight: u32,
+    /// Set by [`AppMessage::QuitRequested`] while commands are in flight: exit when they
+    /// finish, or at this deadline.
+    quit_deadline: Option<Instant>,
     /// Per-slot message for the user (why Auto/Smart skipped or limited a cell, a failed
     /// command). Kept until something new starts on the slot or the cell is removed.
     slot_notices: [Option<String>; 4],
+    /// Last error code each slot's status reported (byte 20, 0 = none). A new code shows
+    /// a notice; when the code clears, its notice goes too.
+    slot_error_codes: [u8; 4],
     /// Smart charge probes waiting for the charger to report internal resistance.
     smart_probes: [Option<SmartProbe>; 4],  // Slots waiting for resistance measurement in auto-charge mode
     show_detailed_stats: bool,  // Toggle for detailed per-slot sample stream
@@ -175,7 +187,7 @@ struct SmartProbe {
 /// How long Smart waits for a resistance reading before keeping the probe current.
 const SMART_PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 /// Charger-reported run time before the resistance reading is trusted.
-const SMART_PROBE_SETTLE_S: u16 = 5;
+const SMART_PROBE_SETTLE_S: u32 = 5;
 
 /// What a background command did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,7 +327,10 @@ impl ChargerApp {
             smart_probes: [None, None, None, None],
             last_device: None,
             pending_stop: 0,
+            commands_in_flight: 0,
+            quit_deadline: None,
             slot_notices: [None, None, None, None],
+            slot_error_codes: [0; 4],
             show_detailed_stats: false,  // Default: hide detailed per-slot stream
             settings,
             show_settings: false,
@@ -538,6 +553,7 @@ impl ChargerApp {
         match self.session.as_ref().filter(|s| !s.is_lost()) {
             Some(session) => {
                 let session = session.clone();
+                self.commands_in_flight += 1;
                 Task::perform(async move { session.stop_slots(mask).await }, move |result| {
                     AppMessage::CommandFinished(CommandKind::Stop, mask, result.map_err(|e| e.to_string()))
                 })
@@ -585,16 +601,63 @@ impl ChargerApp {
 
     /// Runs a command sequence on the shared session in the background. The UI never waits
     /// for the charger; the outcome arrives as [`AppMessage::CommandFinished`].
-    fn run_command<F, Fut>(&self, slots: u8, command: F) -> Task<AppMessage>
+    fn run_command<F, Fut>(&mut self, slots: u8, command: F) -> Task<AppMessage>
     where
         F: FnOnce(Session) -> Fut,
         Fut: std::future::Future<Output = Result<(), BluetoothError>> + Send + 'static,
     {
         match &self.session {
-            Some(session) => Task::perform(command(session.clone()), move |result| {
-                AppMessage::CommandFinished(CommandKind::Start, slots, result.map_err(|e| e.to_string()))
-            }),
+            Some(session) => {
+                let future = command(session.clone());
+                self.commands_in_flight += 1;
+                Task::perform(future, move |result| {
+                    AppMessage::CommandFinished(CommandKind::Start, slots, result.map_err(|e| e.to_string()))
+                })
+            }
             None => Task::none(),
+        }
+    }
+
+    /// How long a quit waits for commands in flight before exiting anyway.
+    const QUIT_WAIT: Duration = Duration::from_secs(20);
+
+    /// Exits now when nothing is in flight; otherwise once the last command finishes (see
+    /// `CommandFinished`) or at the deadline (see `Tick`).
+    fn request_quit(&mut self) -> Task<AppMessage> {
+        if self.commands_in_flight == 0 {
+            return self.quit_now();
+        }
+        if self.quit_deadline.is_none() {
+            self.quit_deadline = Some(Instant::now() + Self::QUIT_WAIT);
+            log::info!("Quit: waiting for {} command(s) to reach the charger", self.commands_in_flight);
+            self.emit("event", serde_json::json!({ "event": "quit_waiting", "commands": self.commands_in_flight }));
+        }
+        Task::none()
+    }
+
+    /// Disconnects and exits. Warns loudly when a stop never reached the charger.
+    fn quit_now(&mut self) -> Task<AppMessage> {
+        self.quit_deadline = None;
+        if self.pending_stop != 0 || self.commands_in_flight != 0 {
+            log::error!(
+                "Exiting with stop mask 0x{:02X} undelivered and {} command(s) unconfirmed: \
+                 check the charger, programs may still be running",
+                self.pending_stop,
+                self.commands_in_flight
+            );
+            self.emit("event", serde_json::json!({
+                "event": "stop_not_delivered",
+                "slots": self.pending_stop,
+                "commands_in_flight": self.commands_in_flight,
+            }));
+        }
+        match self.session.take() {
+            Some(session) => Task::future(async move {
+                let _ = session.disconnect().await;
+            })
+            .discard()
+            .chain(iced::exit()),
+            None => iced::exit(),
         }
     }
 
@@ -662,6 +725,8 @@ impl ChargerApp {
                     capacity_mah: slot.capacity_mah,
                     resistance_mohm: slot.resistance_milliohm,
                     elapsed_s: slot.elapsed_seconds,
+                    temperature_c: slot.temperature_c,
+                    charger_error: Some(self.slot_error_codes[i]).filter(|&code| code != 0),
                     task: slot.current_task.as_ref().map(|t| t.task_type.to_string()),
                     error: match &slot.state {
                         SlotState::Error(e) => Some(e.clone()),
@@ -797,19 +862,27 @@ impl ChargerApp {
             }
             "quit" | "exit" => {
                 self.emit("ack", serde_json::json!({ "command": line }));
-                return match self.session.take() {
-                    Some(session) => Task::future(async move {
-                        let _ = session.disconnect().await;
-                    })
-                    .discard()
-                    .chain(iced::exit()),
-                    None => iced::exit(),
-                };
+                return self.update(AppMessage::QuitRequested);
             }
             _ => return fail("unknown command (try 'help')".into()),
         };
         self.emit("ack", serde_json::json!({ "command": line }));
         task
+    }
+
+    /// Shows the charger's error code for a slot as its notice when the code changes, and
+    /// removes that notice once the charger clears the code.
+    fn note_charger_error(&mut self, idx: usize, code: u8) {
+        let previous = self.slot_error_codes[idx];
+        if code == previous {
+            return;
+        }
+        self.slot_error_codes[idx] = code;
+        if code != 0 {
+            self.slot_notices[idx] = Some(charger_error_notice(code));
+        } else if self.slot_notices[idx].as_deref() == Some(charger_error_notice(previous).as_str()) {
+            self.slot_notices[idx] = None;
+        }
     }
 
     fn handle(&mut self, message: AppMessage) -> Task<AppMessage> {
@@ -829,6 +902,7 @@ impl ChargerApp {
                         // Cell removed: its notice no longer applies.
                         self.slot_notices[slot_idx] = None;
                     }
+                    self.note_charger_error(slot_idx, status.error.unwrap_or(0));
                     self.reported_modes[slot_idx] = match (status.chemistry, status.mode) {
                         (Some(chemistry), Some(mode)) => Some(format!("{} {}", chemistry.name(), mode.name())),
                         _ => None,
@@ -862,6 +936,7 @@ impl ChargerApp {
                                 status.resistance_milliohm,
                                 status.elapsed_seconds
                             );
+                            slot.temperature_c = status.temperature_c;
                             // The parser now returns Charging for any active slot (current>0).
                             // Restore Discharging when the task type calls for it.
                             let mut new_state = map_bt_state(&status.state);
@@ -926,7 +1001,10 @@ impl ChargerApp {
             
             AppMessage::Tick => {
                 // Status polling runs inside the shared session; the timer only refreshes
-                // time-based UI (elapsed times, button cooldowns).
+                // time-based UI (elapsed times, button cooldowns) and ends an overdue quit.
+                if self.quit_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return self.quit_now();
+                }
                 Task::none()
             }
 
@@ -1107,6 +1185,7 @@ impl ChargerApp {
             }
 
             AppMessage::CommandFinished(kind, slots, result) => {
+                self.commands_in_flight = self.commands_in_flight.saturating_sub(1);
                 self.emit("event", serde_json::json!({
                     "event": "command_finished",
                     "command": format!("{kind:?}").to_lowercase(),
@@ -1131,8 +1210,13 @@ impl ChargerApp {
                         }
                     }
                 }
+                if self.quit_deadline.is_some() && self.commands_in_flight == 0 {
+                    return self.quit_now();
+                }
                 Task::none()
             }
+
+            AppMessage::QuitRequested => self.request_quit(),
 
             AppMessage::RefreshDevices => {
                 if verbose {
@@ -1200,8 +1284,10 @@ impl ChargerApp {
                 }
                 let task = self.stop_command(slot_bit);
 
+                // The charger decides when the slot is idle: keep its state until a status
+                // says so (the Stop button stays disabled meanwhile).
                 if let Some(slot) = self.slots.get_mut(slot_id.0) {
-                    slot.stop();
+                    slot.forget_task();
                 }
                 self.slot_configs[slot_id.0] = None;
                 self.smart_probes[slot_id.0] = None;
@@ -1216,8 +1302,12 @@ impl ChargerApp {
                 }
                 let task = self.stop_command(0x0F);
 
-                for slot in &mut self.slots {
-                    slot.stop();
+                // States change when the charger reports the slots idle.
+                for (i, slot) in self.slots.iter_mut().enumerate() {
+                    if slot.is_active() || slot.state == SlotState::Paused {
+                        self.slot_command_pending[i] = Some((Instant::now(), slot.state.clone()));
+                    }
+                    slot.forget_task();
                 }
                 self.smart_probes = [None; 4];
                 task
@@ -1875,7 +1965,9 @@ impl ChargerApp {
             None => Subscription::none(),
         };
 
-        Subscription::batch([tick, session_events, control])
+        let close = iced::window::close_requests().map(|_| AppMessage::QuitRequested);
+
+        Subscription::batch([tick, session_events, control, close])
     }
 
     pub fn theme(&self) -> Theme {
@@ -1891,6 +1983,27 @@ impl ChargerApp {
             .map(|t| Instant::now() < t)
             .unwrap_or(false)
     }
+}
+
+/// The notice for a charger error code (status byte 20), in the user's language.
+fn charger_error_notice(code: u8) -> String {
+    use crate::i18n::t;
+    let error = match code {
+        1 => t!("charger_error.input_low"),
+        2 => t!("charger_error.input_high"),
+        3 | 9 => t!("charger_error.connection"),
+        4 => t!("charger_error.capacity_limit"),
+        5 => t!("charger_error.time_limit"),
+        6 => t!("charger_error.internal_temp"),
+        7 => t!("charger_error.calibration"),
+        8 => t!("charger_error.resistance"),
+        10 => t!("charger_error.battery_type"),
+        11 => t!("charger_error.overload"),
+        12 => t!("charger_error.reversed"),
+        13 => t!("charger_error.full"),
+        _ => t!("charger_error.unknown", code = code),
+    };
+    t!("notice.charger_error", error = error).to_string()
 }
 
 fn map_bt_state(state: &BtSlotState) -> SlotState {
@@ -2012,11 +2125,34 @@ mod tests {
             capacity_mah: 0,
             elapsed_seconds: 0,
             resistance_milliohm: 0,
-            temperature: 0,
+            temperature_c: 0,
             phase: Some(if current_ma > 0 { 2 } else { 0 }),
             mode: None,
             chemistry: None,
+            error: Some(0),
         }
+    }
+
+    #[test]
+    fn charger_error_code_shows_a_notice_until_the_charger_clears_it() {
+        let mut app = create_test_app();
+        let mut s = status(2, 1300, 0);
+        s.error = Some(10);
+        let _ = app.update(AppMessage::StatusReceived(s.clone()));
+        assert_eq!(app.slot_notices[1], Some(super::charger_error_notice(10)));
+        assert_eq!(app.snapshot().slots[1].charger_error, Some(10));
+
+        // The same code again leaves a newer notice alone.
+        app.slot_notices[1] = Some("other".into());
+        let _ = app.update(AppMessage::StatusReceived(s.clone()));
+        assert_eq!(app.slot_notices[1].as_deref(), Some("other"));
+
+        // Cleared code: only its own notice is removed.
+        app.slot_notices[1] = Some(super::charger_error_notice(10));
+        s.error = Some(0);
+        let _ = app.update(AppMessage::StatusReceived(s));
+        assert_eq!(app.slot_notices[1], None);
+        assert_eq!(app.snapshot().slots[1].charger_error, None);
     }
 
     #[test]
@@ -2225,11 +2361,61 @@ mod tests {
     }
 
     #[test]
-    fn test_commands_without_connection_only_update_the_ui() {
+    fn test_stop_without_connection_is_queued_and_keeps_the_state() {
         let mut app = create_test_app();
         app.slots[1].state = SlotState::Charging;
         let _ = app.update(AppMessage::StopAllSlots);
-        assert_eq!(app.slots[1].state, SlotState::Idle);
+        assert_eq!(app.pending_stop, 0x0F, "delivered on the next connection");
+        assert_eq!(app.slots[1].state, SlotState::Charging, "not idle until the charger says so");
+        assert!(app.slot_command_pending[1].is_some(), "Stop stays disabled meanwhile");
+    }
+
+    #[test]
+    fn test_stopped_slot_turns_idle_only_when_the_charger_reports_it() {
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::StatusReceived(status(3, 1300, 400)));
+        assert_eq!(app.slots[2].state, SlotState::Charging);
+
+        let _ = app.update(AppMessage::StopTask(SlotId(2)));
+        assert_eq!(app.slots[2].state, SlotState::Charging);
+        assert!(app.slots[2].current_task.is_none());
+
+        // Still charging: the stop has not reached the charger yet.
+        let _ = app.update(AppMessage::StatusReceived(status(3, 1300, 400)));
+        assert_eq!(app.slots[2].state, SlotState::Charging);
+        assert!(app.slot_command_pending[2].is_some());
+
+        let _ = app.update(AppMessage::StatusReceived(status(3, 1300, 0)));
+        assert_eq!(app.slots[2].state, SlotState::Idle);
+        assert!(app.slot_command_pending[2].is_none(), "Stop/Configure usable again");
+    }
+
+    #[test]
+    fn test_quit_waits_for_commands_in_flight() {
+        let mut app = create_test_app();
+        app.commands_in_flight = 1; // e.g. a stop on its way to the charger
+        let _ = app.update(AppMessage::QuitRequested);
+        assert!(app.quit_deadline.is_some(), "waits instead of exiting");
+
+        let _ = app.update(AppMessage::Tick);
+        assert!(app.quit_deadline.is_some(), "deadline not reached");
+
+        let _ = app.update(AppMessage::CommandFinished(CommandKind::Stop, 0x08, Ok(())));
+        assert_eq!(app.commands_in_flight, 0);
+        assert!(app.quit_deadline.is_none(), "exits once the stop went out");
+    }
+
+    #[test]
+    fn test_quit_exits_at_the_deadline_and_at_once_when_idle() {
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::QuitRequested);
+        assert!(app.quit_deadline.is_none(), "nothing in flight: exits at once");
+
+        app.commands_in_flight = 1;
+        let _ = app.update(AppMessage::QuitRequested);
+        app.quit_deadline = Some(Instant::now() - Duration::from_secs(1));
+        let _ = app.update(AppMessage::Tick);
+        assert!(app.quit_deadline.is_none(), "gave up waiting");
     }
 
     #[test]

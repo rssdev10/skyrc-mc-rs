@@ -107,5 +107,19 @@
   "notice.worn_cell": "Celda desgastada (%{resistance} mΩ): carga suave a %{current} mA.",
   "notice.resistance_too_high": "No se carga: %{resistance} mΩ es demasiado (averiada o no recargable).",
   "notice.no_resistance": "Resistencia no medida; cargando con la corriente de prueba.",
-  "notice.command_failed": "El comando falló: %{error}"
+  "notice.command_failed": "El comando falló: %{error}",
+  "notice.charger_error": "El cargador indica: %{error}",
+  "charger_error.input_low": "tensión de entrada demasiado baja",
+  "charger_error.input_high": "tensión de entrada demasiado alta",
+  "charger_error.connection": "conexión interrumpida",
+  "charger_error.capacity_limit": "límite de capacidad alcanzado",
+  "charger_error.time_limit": "límite de tiempo alcanzado",
+  "charger_error.internal_temp": "temperatura interna demasiado alta",
+  "charger_error.calibration": "calibración fallida",
+  "charger_error.resistance": "resistencia interna demasiado alta",
+  "charger_error.battery_type": "tipo de batería incorrecto",
+  "charger_error.overload": "protección contra sobrecarga",
+  "charger_error.reversed": "polaridad invertida",
+  "charger_error.full": "carga completa",
+  "charger_error.unknown": "error %{code}"
 }

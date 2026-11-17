@@ -255,8 +255,10 @@ stdin; `--control` does the same with the window visible. Each command produces 
 `AppMessage`s a user's clicks do (for example `start` opens the Configure dialog, fills it in and
 presses Confirm), so the GUI's own state machine, tasks and BLE session are what get tested.
 Feedback is one JSON object per line on stdout: `state` snapshots, `event`s (`connected`,
-`connect_failed`, `connection_lost`, `command_finished`, `scanned`), `ack`s and `error`s. A
-failed `wait-until` makes the process exit with status 1.
+`connect_failed`, `connection_lost`, `command_finished`, `scanned`, `quit_waiting`,
+`stop_not_delivered`), `ack`s and `error`s. A failed `wait-until` makes the process exit with
+status 1. After `stop`, `wait-until slot <n> idle` returns only once the charger reports the slot
+idle, and `quit` waits for commands still on their way to the charger.
 
 ```bash
 charger-controller -H status          # connect, print one state snapshot, quit

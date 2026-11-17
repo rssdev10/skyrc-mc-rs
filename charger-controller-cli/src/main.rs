@@ -376,6 +376,15 @@ fn running_mask(statuses: &[Option<MC5000SlotStatus>; 4]) -> u8 {
         .fold(0, |mask, (i, _)| mask | 1 << i)
 }
 
+/// The charger's error code (status byte 20) as text: "-" for none.
+fn error_name(code: Option<u8>) -> String {
+    match code {
+        None | Some(0) => "-".to_string(),
+        Some(c) => mc5000_protocol::bluetooth::charger_error_text(c)
+            .map_or_else(|| format!("code {c}"), str::to_string),
+    }
+}
+
 fn status_row(slot: u8, status: &MC5000SlotStatus) -> String {
     let state_str = format!("{} {}", state_symbol(&status.state), state_name(&status.state));
     let voltage = format!("{:.3}V", status.voltage_mv as f32 / 1000.0);
@@ -384,17 +393,17 @@ fn status_row(slot: u8, status: &MC5000SlotStatus) -> String {
     let resistance = status.resistance_milliohm.to_string();
     let time = format_time(status.elapsed_seconds);
     format!(
-        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
-        slot, state_str, voltage, current, capacity, resistance, time
+        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}  {}",
+        slot, state_str, voltage, current, capacity, resistance, time, error_name(status.error)
     )
 }
 
 fn print_status_header() {
     println!(
-        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}",
+        "{:>4} {:>12} {:>8} {:>8} {:>9} {:>6} {:>12}  Charger error",
         "Slot", "State", "Voltage", "Current", "Capacity", "R(mΩ)", "Time"
     );
-    println!("{}", "-".repeat(65));
+    println!("{}", "-".repeat(80));
 }
 
 async fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
@@ -602,7 +611,7 @@ async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>>
     }
     let session = connect(verbose, ConnectMode::Control).await?;
 
-    // The FE query selects the slots that 0x93 0x00 then stops; others keep running.
+    // One FE stop per slot (a multi-slot FE mask stops only the lowest); others keep running.
     let stopped = match slot {
         None => {
             println!("Stopping all slots...");
@@ -780,7 +789,7 @@ async fn reconnect(verbose: bool, running: &AtomicBool) -> Result<Session, Box<d
     Err(format!("Connection to the charger was lost; reconnecting failed: {last_error}").into())
 }
 
-fn format_time(seconds: u16) -> String {
+fn format_time(seconds: u32) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let secs = seconds % 60;
@@ -805,15 +814,23 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
         0x06 => println!("TYPE: Greeting (unsolicited)"),
         0x57 => {
             println!("TYPE: Device Info Response");
-            if data.len() >= 22 {
-                println!("  Serial: {}", String::from_utf8_lossy(&data[4..11]));
-                println!("  FW: {}.{}", data[16], data[17]);
-                println!("  HW: {}.{}", data[18], data[19]);
+            match mc5000_protocol::bluetooth::MC5000DeviceInfo::parse_from_response(data) {
+                Ok(info) => println!(
+                    "  Model: {}  FW: {}  HW: {}",
+                    info.serial_number, info.firmware_version, info.hardware_version
+                ),
+                Err(e) => println!("  (not decoded: {e})"),
             }
         }
-        0x74 => println!("TYPE: Version Info"),
-        0x65 => println!("TYPE: Settings"),
-        0xFE => println!("TYPE: Slot Query (0xFE)"),
+        0x74 => println!(
+            "TYPE: Password check: {}",
+            if data.get(4) == Some(&1) { "accepted" } else { "rejected" }
+        ),
+        0x65 => println!("TYPE: Firmware-update flag reply"),
+        0xFE => println!(
+            "TYPE: Stop reply: {}",
+            if data.get(4) == Some(&1) { "stopped" } else { "FAILED" }
+        ),
         0x91 => {
             println!("TYPE: Slot Status (0x91)");
             for (i, byte) in data.iter().enumerate().skip(3) {
@@ -821,7 +838,7 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
             }
             match frame.status() {
                 Some(s) => println!(
-                    "DECODED: slot {} {:?} phase={:?} mode={} {:.3}V {}mA {}mAh {}s R={}mΩ",
+                    "DECODED: slot {} {:?} phase={:?} mode={} {:.3}V {}mA {}mAh {}s R={}mΩ T={}°C error={}",
                     s.slot_id,
                     s.state,
                     s.phase,
@@ -830,17 +847,14 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
                     s.current_ma,
                     s.capacity_mah,
                     s.elapsed_seconds,
-                    s.resistance_milliohm
+                    s.resistance_milliohm,
+                    s.temperature_c,
+                    error_name(s.error),
                 ),
                 None => println!("DECODED: unknown slot"),
             }
         }
-        0x93 => {
-            println!("TYPE: Start/Stop ACK");
-            if data.len() >= 4 {
-                println!("  action = 0x{:02X}", data[3]);
-            }
-        }
+        0x93 => println!("TYPE: 0x93 reply (the charger is not known to answer 0x93)"),
         0x94 => {
             println!("TYPE: Config ACK");
             if data.len() >= 5 {
@@ -919,10 +933,11 @@ mod tests {
             capacity_mah: 0,
             elapsed_seconds: 0,
             resistance_milliohm: 0,
-            temperature: 0,
+            temperature_c: 0,
             phase: Some(if current_ma > 0 { 2 } else { 0 }),
             mode: None,
             chemistry: None,
+            error: Some(0),
         })
     }
 

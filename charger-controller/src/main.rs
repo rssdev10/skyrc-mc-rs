@@ -238,6 +238,9 @@ fn run_gui(
         min_size: Some(iced::Size::new(1000.0, 600.0)),
         icon,
         visible: !headless,
+        // Closing goes through AppMessage::QuitRequested, which lets a stop in flight
+        // reach the charger before the app exits.
+        exit_on_close_request: false,
         ..Default::default()
     })
     .run()?;

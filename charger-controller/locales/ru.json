@@ -107,5 +107,19 @@
   "notice.worn_cell": "Изношенный элемент (%{resistance} мОм): бережная зарядка током %{current} мА.",
   "notice.resistance_too_high": "Не заряжается: %{resistance} мОм — слишком много (неисправен или не аккумулятор).",
   "notice.no_resistance": "Сопротивление не измерено; зарядка током пробного импульса.",
-  "notice.command_failed": "Команда не выполнена: %{error}"
+  "notice.command_failed": "Команда не выполнена: %{error}",
+  "notice.charger_error": "Зарядное устройство: %{error}",
+  "charger_error.input_low": "слишком низкое входное напряжение",
+  "charger_error.input_high": "слишком высокое входное напряжение",
+  "charger_error.connection": "обрыв соединения",
+  "charger_error.capacity_limit": "достигнут предел ёмкости",
+  "charger_error.time_limit": "достигнут предел времени",
+  "charger_error.internal_temp": "слишком высокая внутренняя температура",
+  "charger_error.calibration": "ошибка калибровки",
+  "charger_error.resistance": "слишком высокое внутреннее сопротивление",
+  "charger_error.battery_type": "неверный тип аккумулятора",
+  "charger_error.overload": "защита от перегрузки",
+  "charger_error.reversed": "обратная полярность",
+  "charger_error.full": "полностью заряжен",
+  "charger_error.unknown": "ошибка %{code}"
 }
