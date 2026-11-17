@@ -28,8 +28,8 @@ Commands (one per line):
   select <n|text>              pick a charger by list number (1-based) or name/ID text
   connect | disconnect         Connect / Disconnect buttons
   start <slot> [key=value...]  open Configure for <slot>, apply settings, press Confirm
-                               keys: chemistry mode capacity current discharge target
-                                     cutoff cycles
+                               keys: chemistry eneloop mode capacity current discharge
+                                     target cutoff cycles
   configure <slot>             open the Configure dialog only
   set <key> <value>            change a field in the open dialog
   confirm | cancel             press Confirm / Cancel in the dialog
@@ -45,6 +45,7 @@ Commands (one per line):
   quit                         exit
   help                         this text
 Chemistries: liion liionhv lifepo4 nimh nicd eneloop nizn ram lto naion
+eneloop types: std-aa std-aaa proxx-aa proxx-aaa lite-aa lite-aaa plus-aa std-c std-d
 Modes: charge storage discharge cycle refresh breakin";
 
 /// Set when a scripted wait times out or a command fails; the process then exits with 1.
@@ -124,6 +125,15 @@ pub fn emit_error(message: &str) {
     emit("error", serde_json::json!({ "message": message }));
 }
 
+/// An eneloop type by name ("lite-aa", "Pro/XX AA", ...) or by its index (0-8).
+fn parse_eneloop(value: &str) -> Option<mc5000_protocol::EneloopType> {
+    let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
+    let wanted = key(value);
+    mc5000_protocol::EneloopType::ALL
+        .into_iter()
+        .find(|t| key(t.name()) == wanted || (*t as u8).to_string() == wanted)
+}
+
 pub fn parse_chemistry(text: &str) -> Option<BatteryChemistry> {
     let key: String = text
         .to_ascii_lowercase()
@@ -159,6 +169,9 @@ pub fn dialog_field(key: &str, value: &str) -> Result<AppMessage, String> {
     Ok(match key {
         "chemistry" => AppMessage::ConfigChemistryChanged(
             parse_chemistry(&value).ok_or_else(|| format!("unknown chemistry '{value}'"))?,
+        ),
+        "eneloop" => AppMessage::ConfigEneloopTypeChanged(
+            parse_eneloop(&value).ok_or_else(|| format!("unknown eneloop type '{value}'"))?,
         ),
         "mode" => AppMessage::ConfigModeChanged(
             parse_mode(&value).ok_or_else(|| format!("unknown mode '{value}'"))?,
@@ -331,6 +344,15 @@ async fn wait_until(snapshots: &mut watch::Receiver<Snapshot>, condition: &[&str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eneloop_types_parse_by_name_or_index() {
+        use mc5000_protocol::EneloopType;
+        assert_eq!(super::parse_eneloop("lite-aa"), Some(EneloopType::LiteAA));
+        assert_eq!(super::parse_eneloop("Pro/XX AAA"), Some(EneloopType::ProXXAAA));
+        assert_eq!(super::parse_eneloop("8"), Some(EneloopType::StdD));
+        assert_eq!(super::parse_eneloop("pro"), None);
+    }
+
     use super::*;
 
     #[test]

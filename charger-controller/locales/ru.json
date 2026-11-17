@@ -121,5 +121,6 @@
   "charger_error.overload": "защита от перегрузки",
   "charger_error.reversed": "обратная полярность",
   "charger_error.full": "полностью заряжен",
-  "charger_error.unknown": "ошибка %{code}"
+  "charger_error.unknown": "ошибка %{code}",
+  "config.eneloop_type": "Тип eneloop"
 }

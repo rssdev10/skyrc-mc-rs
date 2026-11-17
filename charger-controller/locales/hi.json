@@ -121,5 +121,6 @@
   "charger_error.overload": "ओवरलोड सुरक्षा",
   "charger_error.reversed": "उलटी ध्रुवता",
   "charger_error.full": "पूरी तरह चार्ज",
-  "charger_error.unknown": "त्रुटि %{code}"
+  "charger_error.unknown": "त्रुटि %{code}",
+  "config.eneloop_type": "eneloop प्रकार"
 }

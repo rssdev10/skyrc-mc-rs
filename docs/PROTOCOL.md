@@ -244,6 +244,10 @@ the set 100 mA.
 | 12 | Reversed Polarity! | |
 | 13 | Fully Charged! | ✓ |
 
+The firmware 1.83 image also contains the texts "Battery Temp. Too High!", "Overcharged!" and
+"Startup Failure!", which the app has no codes for: the charger has a battery temperature sensor
+(so status bytes 8-9 can be non-zero), and some error codes are not in the table above.
+
 Bytes 19–21 describe what was configured and stay set after a stop; byte 18 says whether it is
 running. Bytes 4–5 are always the current magnitude (no sign): use byte 18 for direction.
 
@@ -336,7 +340,7 @@ NiCd, eneloop) 0 Charge, 1 Refresh, 2 Break-in, 3 Discharge, 4 Cycle; NiZn and R
 | 34 | 31 | 00 | Turbo mode (app); 0 in every captured config | - | ✓ / app |
 | 35 | 32 | XX | **Chemistry byte**: 0x00=Li-Ion, 0x03=NiMH (see table above) | - | ✓✓ |
 | 36-37 | 33-34 | XX XX | **Storage voltage** (mV) (app): 3800 Li-Ion, 3900 Li-Ion HV, 3300 LiFePO4, 2400 LTO, 3500 Na-Ion. Nickel, NiZn and RAM programs leave it at 3300 (it is not 110 % of capacity: an eneloop config with 2000 mAh also carries 3300). | BE | ✓✓ |
-| 38 | 35 | 00 | eneloop sub-type (app); 0 in every captured config | - | ✓ / app |
+| 38 | 35 | XX | **eneloop cell type** for eneloop programs, 0 otherwise (app; see below). The captured eneloop config carried 0 with Std AA's defaults. | - | ✓ / app |
 | 39-42 | 36-39 | 00... | Unused, always 0 | - | ✓ |
 | 43 | - | XX | Checksum | - | ✓ |
 
@@ -469,6 +473,47 @@ From the app; listed so nobody experiments with them by accident:
 | 0x97 | Reset (`97 04`) |
 | 0x92 | "Turbo" setting |
 | 0x98 | Charge history (curve) download |
+
+### Commands the firmware accepts
+
+The firmware 1.83 image's command dispatcher handles exactly these command bytes (static
+analysis of the official image):
+
+`06 07 55 56 57 5F 60 65 66 74 88 91 94 95 96 97 98 99 FE`
+
+- **0x93 is not among them**, which is why the charger never answers it.
+- 0x61 and 0x62 are not either: after 0x60 the update data is taken by the boot loader, which
+  occupies the flash below the application (the application is linked at 0xC000).
+- Before dispatching, the firmware turns the channel byte into **one** slot index. Hence a
+  multi-bit 0xFE mask stops only the lowest slot, and `91 0F` returns one frame.
+
+Two of the other commands, read-only per the firmware, were tried live on firmware 1.83:
+
+- **0x5F** (`5F <mask> <4 password digits>`): a 12-byte reply per slot. Bytes 8 and 9 are the
+  slot's programmed charge and discharge currents in 100 mA units (`1e 14` = 3000 / 2000 mA);
+  byte 12 is `01` when the password digits match. Example: `0f 0c 5f 01 00 00 05 00 1e 14 00 00 01 98`.
+- **0x55** (`55 <mask>`): a 34-byte reply, mostly left over from the previous reply (the
+  firmware fills only a few fields of a shared buffer). Not useful.
+
+0x56 (password change), 0x88, 0x95 (write settings), 0x97, 0x98 and 0x99 were not tried.
+
+### eneloop cell types (0x94 byte 35)
+
+The official app offers these types for eneloop programs and sends the index in byte 35;
+choosing one also sets its default capacity and currents. The charger's own menu lists the same
+types (its firmware also names Pro AA and Pro AAA, which the app does not offer).
+
+| Byte 35 | Type | App defaults: capacity / charge / discharge |
+|---------|------|---------------------------------------------|
+| 0 | Std AA | 2000 mAh / 1000 mA / 500 mA |
+| 1 | Std AAA | 800 / 400 / 200 |
+| 2 | Pro/XX AA | 2500 / 1250 / 600 |
+| 3 | Pro/XX AAA | 900 / 450 / 200 |
+| 4 | Lite AA | 1000 / 500 / 250 |
+| 5 | Lite AAA | 600 / 300 / 150 |
+| 6 | Plus AA | 2200 / 1100 / 550 |
+| 7 | Std C | 3200 / 1600 / 800 |
+| 8 | Std D | 6000 / 3000 / 1500 |
 
 ---
 

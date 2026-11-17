@@ -121,5 +121,6 @@
   "charger_error.overload": "overload protection",
   "charger_error.reversed": "reversed polarity",
   "charger_error.full": "fully charged",
-  "charger_error.unknown": "error %{code}"
+  "charger_error.unknown": "error %{code}",
+  "config.eneloop_type": "eneloop type"
 }

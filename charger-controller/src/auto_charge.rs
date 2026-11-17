@@ -284,6 +284,7 @@ pub fn to_protocol_config(
         charge_resting_min: config.charge_resting_min,
         discharge_resting_min: config.discharge_resting_min,
         cycle_count: config.cycle_count as u8,
+        eneloop_type: mc5000_protocol::EneloopType::from_byte(config.eneloop_type).unwrap_or_default(),
     }
 }
 

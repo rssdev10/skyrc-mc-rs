@@ -589,9 +589,14 @@ impl MC5000Protocol {
         data.push((secondary_value >> 8) as u8);
         data.push((secondary_value & 0xFF) as u8);
         
-        // Byte 35: eneloop sub-type (official app; 0 in captures). Bytes 36-39: unused.
-        // Verified: capture packets are 44 bytes total = start(1) + length(1) + cmd(1) + data(40) + checksum(1)
-        data.extend([0x00u8; 5]);
+        // Byte 35: eneloop cell type (official app); 0 for other chemistries.
+        data.push(if config.chemistry == BatteryChemistry::Eneloop {
+            config.eneloop_type as u8
+        } else {
+            0
+        });
+        // Bytes 36-39: unused. Captured frames are 44 bytes: start, length, cmd, 40 data, sum.
+        data.extend([0x00u8; 4]);
         
         debug_assert_eq!(data.len(), 40, "Config data must be exactly 40 bytes");
 
@@ -1116,6 +1121,78 @@ pub struct ChargeConfig {
     /// Number of charge/discharge cycles (for Cycle mode).
     /// Encoded at data[20] as single byte. Default 1, confirmed up to 2 in series 5.
     pub cycle_count: u8,
+    /// eneloop cell type (0x94 byte 35), used only when `chemistry` is eneloop.
+    pub eneloop_type: EneloopType,
+}
+
+/// The eneloop cell types the official app offers, in its order: the variant's value is
+/// the 0x94 byte 35 it sends (the charger's own menu lists the same types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum EneloopType {
+    #[default]
+    StdAA = 0,
+    StdAAA = 1,
+    ProXXAA = 2,
+    ProXXAAA = 3,
+    LiteAA = 4,
+    LiteAAA = 5,
+    PlusAA = 6,
+    StdC = 7,
+    StdD = 8,
+}
+
+impl EneloopType {
+    pub const ALL: [EneloopType; 9] = [
+        EneloopType::StdAA,
+        EneloopType::StdAAA,
+        EneloopType::ProXXAA,
+        EneloopType::ProXXAAA,
+        EneloopType::LiteAA,
+        EneloopType::LiteAAA,
+        EneloopType::PlusAA,
+        EneloopType::StdC,
+        EneloopType::StdD,
+    ];
+
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(byte)).copied()
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            EneloopType::StdAA => "Std AA",
+            EneloopType::StdAAA => "Std AAA",
+            EneloopType::ProXXAA => "Pro/XX AA",
+            EneloopType::ProXXAAA => "Pro/XX AAA",
+            EneloopType::LiteAA => "Lite AA",
+            EneloopType::LiteAAA => "Lite AAA",
+            EneloopType::PlusAA => "Plus AA",
+            EneloopType::StdC => "Std C",
+            EneloopType::StdD => "Std D",
+        }
+    }
+
+    /// The official app's defaults for the type: (capacity mAh, charge mA, discharge mA),
+    /// i.e. the nominal capacity, 0.5 C and about 0.25 C.
+    pub fn defaults(self) -> (u16, u16, u16) {
+        match self {
+            EneloopType::StdAA => (2000, 1000, 500),
+            EneloopType::StdAAA => (800, 400, 200),
+            EneloopType::ProXXAA => (2500, 1250, 600),
+            EneloopType::ProXXAAA => (900, 450, 200),
+            EneloopType::LiteAA => (1000, 500, 250),
+            EneloopType::LiteAAA => (600, 300, 150),
+            EneloopType::PlusAA => (2200, 1100, 550),
+            EneloopType::StdC => (3200, 1600, 800),
+            EneloopType::StdD => (6000, 3000, 1500),
+        }
+    }
+}
+
+impl std::fmt::Display for EneloopType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 impl ChargeConfig {
@@ -1143,6 +1220,7 @@ impl ChargeConfig {
             charge_resting_min: 10,   // Default 10 min (observed in all captures)
             discharge_resting_min: 10, // Default 10 min
             cycle_count: 1,           // Default 1 cycle
+            eneloop_type: EneloopType::StdAA,
         }
     }
     
@@ -1912,6 +1990,22 @@ mod tests {
         assert_eq!((s.system_beep, s.notification_beep, s.end_beep, s.lcd, s.warning, s.sleep), (0, 0, 0, 1, 1, 0));
         assert!(MC5000SystemSettings::parse_from_response(&hex("0f0465010167")).is_err());
         assert_eq!(MC5000Protocol::build_system_settings_query(), hex("0f0396049a"));
+    }
+
+    #[test]
+    fn eneloop_type_goes_into_byte_35_for_eneloop_only() {
+        let mut config = ChargeConfig::new(1, BatteryChemistry::Eneloop, OperationMode::Charge, 1000, 500);
+        config.eneloop_type = EneloopType::LiteAA;
+        let frame = MC5000Protocol::build_charge_config_command(&config).unwrap();
+        assert_eq!((frame.len(), frame[3 + 35]), (44, 4));
+        config.chemistry = BatteryChemistry::NiMH;
+        let frame = MC5000Protocol::build_charge_config_command(&config).unwrap();
+        assert_eq!(frame[3 + 35], 0, "other chemistries send 0");
+        // The official app's order (its eneloop_mode list).
+        let names: Vec<_> = EneloopType::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(names, ["Std AA", "Std AAA", "Pro/XX AA", "Pro/XX AAA", "Lite AA", "Lite AAA", "Plus AA", "Std C", "Std D"]);
+        assert_eq!(EneloopType::from_byte(8), Some(EneloopType::StdD));
+        assert_eq!(EneloopType::from_byte(9), None);
     }
 
     #[test]

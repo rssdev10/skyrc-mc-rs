@@ -84,6 +84,10 @@ the affected slots to `Error`.
 - The slot header shows the battery temperature (°C) only when the charger reports one
   (snapshot field `temperature_c`). Elapsed time reads `mm:ss`, or `h:mm:ss` from one hour on.
   The charger's "waiting to start" and "resting between stages" phases show as Paused.
+- For eneloop, the Configure dialog shows an **eneloop type** picker (Std AA … Std D). Picking a
+  type fills in its capacity and charge/discharge currents (the official app's defaults) and
+  the type is sent to the charger; it is kept across mode changes and saved with profiles. The
+  control channel takes it as `eneloop=<type>` (e.g. `lite-aa`).
 - The Configure dialog refuses Confirm, with the reason shown above its buttons, when the
   slot's measured voltage cannot belong to the chosen chemistry (for example NiMH settings on
   a 4.1 V cell). Completion is reported by the charger, never inferred by the GUI.

@@ -62,6 +62,8 @@ pub enum AppMessage {
     // Configuration dialog messages
     ShowConfigDialog(SlotId, f32),  // slot_id, current_voltage
     ConfigChemistryChanged(BatteryChemistry),
+    /// eneloop cell type picked in the Configure dialog.
+    ConfigEneloopTypeChanged(mc5000_protocol::EneloopType),
     ConfigModeChanged(ChargeMode),
     ConfigCapacityChanged(String),
     ConfigChargeCurrentChanged(String),
@@ -1394,6 +1396,14 @@ impl ChargerApp {
                 Task::none()
             }
             
+            AppMessage::ConfigEneloopTypeChanged(eneloop) => {
+                if let Some(state) = &mut self.config_dialog_state {
+                    state.update_eneloop_type(eneloop);
+                    state.config_modified = true;
+                }
+                Task::none()
+            }
+
             AppMessage::ConfigModeChanged(mode) => {
                 if let Some(state) = &mut self.config_dialog_state {
                     state.update_mode(mode);
@@ -2131,6 +2141,31 @@ mod tests {
             chemistry: None,
             error: Some(0),
         }
+    }
+
+    #[test]
+    fn eneloop_type_sets_defaults_survives_a_mode_change_and_reaches_the_charger() {
+        use mc5000_protocol::EneloopType;
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::ConfigureSlot(SlotId(1)));
+        app.config_dialog_state = Some(crate::ui::components::config_dialog::ConfigDialogState::new(1.3));
+        let _ = app.update(AppMessage::ConfigChemistryChanged(BatteryChemistry::Eneloop));
+        let _ = app.update(AppMessage::ConfigEneloopTypeChanged(EneloopType::LiteAA));
+        let state = app.config_dialog_state.as_ref().unwrap();
+        assert_eq!((state.capacity_input.as_str(), state.charge_current_input.as_str()), ("1000", "500"));
+
+        let _ = app.update(AppMessage::ConfigModeChanged(crate::config_dialog::ChargeMode::Discharge));
+        let state = app.config_dialog_state.as_ref().unwrap();
+        assert_eq!(state.eneloop_type(), EneloopType::LiteAA, "kept across the mode change");
+        assert_eq!(state.discharge_current_input, "250");
+
+        let config = crate::auto_charge::to_protocol_config(
+            1,
+            BatteryChemistry::Eneloop,
+            crate::config_dialog::ChargeMode::Discharge,
+            &state.get_config(),
+        );
+        assert_eq!(config.eneloop_type, EneloopType::LiteAA);
     }
 
     #[test]
