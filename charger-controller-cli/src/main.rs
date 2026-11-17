@@ -41,6 +41,10 @@ enum Commands {
         interval: u64,
     },
     
+    /// Show the charger's model, firmware and hardware versions, settings and slots
+    /// (read only; running programs are not touched)
+    Info,
+
     /// Get status of a specific slot or all slots
     Status {
         /// Slot number (1-4), or omit for all slots
@@ -261,6 +265,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
         None => run_monitor(cli.verbose, 2).await,
         Some(Commands::Monitor { interval }) => run_monitor(cli.verbose, *interval).await,
         Some(Commands::Scan) => run_scan(cli.verbose).await,
+        Some(Commands::Info) => run_info(cli.verbose).await,
         Some(Commands::Status { slot }) => run_status(cli.verbose, *slot).await,
         Some(Commands::Charge { slot, chemistry, current, capacity }) => {
             let chem = parse_chemistry(chemistry)
@@ -404,6 +409,98 @@ fn print_status_header() {
         "Slot", "State", "Voltage", "Current", "Capacity", "R(mΩ)", "Time"
     );
     println!("{}", "-".repeat(80));
+}
+
+/// Device information for the customer: what the charger is, its versions and settings,
+/// and what each slot holds. Connects read-only (handshake only).
+async fn run_info(verbose: bool) -> Result<(), Box<dyn Error>> {
+    let session = connect(verbose, ConnectMode::Monitor).await?;
+    let info = session.device_info(Duration::from_secs(3)).await;
+    let settings = session.system_settings(Duration::from_secs(3)).await;
+    let slots = session.read_all_status(Duration::from_secs(2)).await;
+    let _ = session.disconnect().await;
+
+    println!("\n{}", info_report(session.name(), session.id(), info.as_ref().ok(), settings.as_ref().ok(), &slots));
+    if let Err(e) = &info {
+        println!("(device info not received: {e})");
+    }
+    if let Err(e) = &settings {
+        println!("(settings not received: {e})");
+    }
+    Ok(())
+}
+
+/// The text `info` prints. Separate from the I/O so it can be tested.
+fn info_report(
+    name: &str,
+    id: &str,
+    info: Option<&mc5000_protocol::MC5000DeviceInfo>,
+    settings: Option<&mc5000_protocol::MC5000SystemSettings>,
+    slots: &[Option<MC5000SlotStatus>; 4],
+) -> String {
+    let unknown = || "unknown".to_string();
+    let mut out = Vec::new();
+    out.push("Charger".to_string());
+    out.push(format!("  Bluetooth name:   {name}"));
+    out.push(format!(
+        "  Bluetooth ID:     {id}{}",
+        if cfg!(target_os = "macos") { " (assigned by macOS, not the hardware address)" } else { "" }
+    ));
+    let model = info.map(|i| {
+        if i.serial_number == "100214" {
+            format!("SkyRC MC5000 (model ID {})", i.serial_number)
+        } else {
+            format!("model ID {}", i.serial_number)
+        }
+    });
+    out.push(format!("  Model:            {}", model.unwrap_or_else(unknown)));
+    out.push(format!("  Firmware version: {}", info.map(|i| i.firmware_version.clone()).unwrap_or_else(unknown)));
+    out.push(format!("  Hardware version: {}", info.map(|i| i.hardware_version.clone()).unwrap_or_else(unknown)));
+    out.push(format!(
+        "  OEM code:         {}",
+        info.map(|i| if i.oem == "0000" { "0000 (SkyRC)".to_string() } else { i.oem.clone() })
+            .unwrap_or_else(unknown)
+    ));
+    out.push("  Serial number:    not reported by the charger".to_string());
+    out.push(format!(
+        "  Device code:      {}",
+        info.map(|i| i.code.iter().map(|b| format!("{b:02X}")).collect::<String>()).unwrap_or_else(unknown)
+    ));
+
+    if let Some(s) = settings {
+        out.push(String::new());
+        out.push("Charger settings (raw values as the charger reports them)".to_string());
+        out.push(format!(
+            "  System beep {}, notification beep {}, end beep {}, LCD {}, warning {}, sleep {}",
+            s.system_beep, s.notification_beep, s.end_beep, s.lcd, s.warning, s.sleep
+        ));
+    }
+
+    out.push(String::new());
+    out.push("Slots".to_string());
+    for (i, slot) in slots.iter().enumerate() {
+        let line = match slot {
+            None => "no answer".to_string(),
+            Some(s) if s.state == MC5000SlotState::Empty => "empty".to_string(),
+            Some(s) => {
+                let mut line = format!(
+                    "{:.3} V, {}, program: {}",
+                    s.voltage_mv as f32 / 1000.0,
+                    state_name(&s.state),
+                    mode_name(s)
+                );
+                if s.temperature_c > 0 {
+                    line.push_str(&format!(", {} °C", s.temperature_c));
+                }
+                if let Some(code @ 1..) = s.error {
+                    line.push_str(&format!(", charger error: {}", error_name(Some(code))));
+                }
+                line
+            }
+        };
+        out.push(format!("  {}: {line}", i + 1));
+    }
+    out.join("\n")
 }
 
 async fn run_status(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
@@ -814,7 +911,7 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
         0x06 => println!("TYPE: Greeting (unsolicited)"),
         0x57 => {
             println!("TYPE: Device Info Response");
-            match mc5000_protocol::bluetooth::MC5000DeviceInfo::parse_from_response(data) {
+            match mc5000_protocol::MC5000DeviceInfo::parse_from_response(data) {
                 Ok(info) => println!(
                     "  Model: {}  FW: {}  HW: {}",
                     info.serial_number, info.firmware_version, info.hardware_version
@@ -827,6 +924,10 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
             if data.get(4) == Some(&1) { "accepted" } else { "rejected" }
         ),
         0x65 => println!("TYPE: Firmware-update flag reply"),
+        0x96 => match mc5000_protocol::MC5000SystemSettings::parse_from_response(data) {
+            Ok(s) => println!("TYPE: System settings {s:?}"),
+            Err(_) => println!("TYPE: System settings (not decoded)"),
+        },
         0xFE => println!(
             "TYPE: Stop reply: {}",
             if data.get(4) == Some(&1) { "stopped" } else { "FAILED" }
@@ -939,6 +1040,40 @@ mod tests {
             chemistry: None,
             error: Some(0),
         })
+    }
+
+    #[test]
+    fn info_report_lists_versions_and_slots() {
+        // Replies read from an MC5000 with firmware 1.83.
+        let info = mc5000_protocol::MC5000DeviceInfo::parse_from_response(&[
+            0x0F, 0x13, 0x57, 0x00, 0x31, 0x30, 0x30, 0x32, 0x31, 0x34, 0x04, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x53, 0x01, 0x00, 0x7F, 0x57,
+        ])
+        .unwrap();
+        let settings = mc5000_protocol::MC5000SystemSettings::parse_from_response(&[
+            0x0F, 0x09, 0x96, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x98,
+        ])
+        .unwrap();
+        let mut full = status(2, 0).unwrap();
+        full.error = Some(13);
+        let mut empty = status(1, 0).unwrap();
+        empty.state = MC5000SlotState::Empty;
+        let report = info_report("#Charger-FF34", "id", Some(&info), Some(&settings), &[Some(empty), Some(full), None, status(4, 500)]);
+        for expected in [
+            "SkyRC MC5000 (model ID 100214)",
+            "Firmware version: 1.83",
+            "Hardware version: 1",
+            "OEM code:         0000 (SkyRC)",
+            "Serial number:    not reported by the charger",
+            "Device code:      3130303231340400000000015301007F",
+            "LCD 1",
+            "1: empty",
+            "2: 3.700 V, Idle, program: unknown mode, charger error: Fully charged",
+            "3: no answer",
+            "4: 3.700 V, Charging",
+        ] {
+            assert!(report.contains(expected), "missing {expected:?} in:\n{report}");
+        }
     }
 
     #[test]

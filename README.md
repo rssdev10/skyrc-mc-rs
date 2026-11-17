@@ -113,6 +113,9 @@ cargo run -p charger-controller
 # Scan for devices
 charger-cli scan
 
+# Charger model, firmware/hardware versions, settings and slots (read only)
+charger-cli info
+
 # Get all slot status
 charger-cli status
 

@@ -97,6 +97,7 @@ const CMD_CHANNEL_STATUS: u8 = 0x91; // Channel status request
 const CMD_START_STOP: u8 = 0x93;    // Read a slot's stored program (official app); never answered
 const CMD_CHARGE_CONFIG: u8 = 0x94; // Program a slot and start it
 const CMD_SETTINGS: u8 = 0x65;      // Firmware-update-available flag
+const CMD_SYSTEM_SETTINGS: u8 = 0x96; // Read system settings (beeps, LCD, sleep)
 
 /// Argument of the 0x93 frame this client sends after its configs and stops.
 ///
@@ -388,51 +389,30 @@ impl MC5000Protocol {
         packet
     }
 
-    /// Build device info handshake command (0x57)
-    /// Exact format from captured traffic: 0f 13 57 00 ff 34 37 38 c1 a4 00 00 00 00 00 00 00 00 00 00 00 5e
+    /// Build the 0x57 device-info request: `0f 13 57 00` + the charger's BLE address, least
+    /// significant byte first, + 10 zero bytes + checksum (21 bytes, as the official app
+    /// sends it).
+    ///
+    /// Only the last two address bytes are known everywhere: the charger advertises them in
+    /// its name ("#Charger-FF34"). The other four are those of the unit the protocol was
+    /// captured from. That is harmless: the charger answered requests carrying a wrong or an
+    /// all-zero address the same way (verified live).
     pub fn build_device_info_command(bt_suffix: &str) -> Vec<u8> {
-        // Build the exact packet format seen in captures
-        // Total: 22 bytes: start(1) + length(1) + cmd(1) + data(18) + checksum(1)
-        // Length field = 0x13 = 19 = cmd(1) + data(17) + checksum(1)
-        let mut packet = Vec::with_capacity(22);
-        
-        packet.push(PACKET_START);  // 0x0F
-        packet.push(0x13);          // Length = 19 (cmd + 17 data bytes + checksum)
-        packet.push(CMD_DEVICE_INFO); // 0x57
-        packet.push(0x00);          // Subcommand
-        
-        // Add BT address bytes from suffix like "FF34"
-        if bt_suffix.len() >= 4 {
-            if let Ok(b1) = u8::from_str_radix(&bt_suffix[0..2], 16) {
-                packet.push(b1);
-            } else {
-                packet.push(0xFF);
-            }
-            if let Ok(b2) = u8::from_str_radix(&bt_suffix[2..4], 16) {
-                packet.push(b2);
-            } else {
-                packet.push(0x34);
-            }
-        } else {
-            packet.push(0xFF);
-            packet.push(0x34);
-        }
-        
-        // Fixed bytes from capture (possibly app identifier or magic values)
-        packet.extend_from_slice(&[0x37, 0x38, 0xc1, 0xa4]);
-        
-        // Padding - need 11 zeros to reach 21 bytes before checksum
-        // We have: start(1) + len(1) + cmd(1) + sub(1) + addr(2) + magic(4) = 10 bytes
-        // Need 21 bytes before checksum, so add 11 zeros
-        while packet.len() < 21 {
-            packet.push(0x00);
-        }
-        
-        // Calculate checksum: sum of bytes from index 2 (cmd) to end, mod 256
-        let checksum = Self::calculate_checksum(&packet[2..]);
-        packet.push(checksum);
-        
-        packet
+        let byte = |i: usize, fallback: u8| {
+            bt_suffix
+                .get(i..i + 2)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .unwrap_or(fallback)
+        };
+        let mut data = [0u8; 17];
+        data[1..7].copy_from_slice(&[byte(0, 0xFF), byte(2, 0x34), 0x37, 0x38, 0xC1, 0xA4]);
+        Self::build_packet(CMD_DEVICE_INFO, &data)
+    }
+
+    /// Build the 0x96 system-settings read (`96 04`, as the official app sends it). Read
+    /// only; the reply parses with [`MC5000SystemSettings::parse_from_response`].
+    pub fn build_system_settings_query() -> Vec<u8> {
+        Self::build_packet(CMD_SYSTEM_SETTINGS, &[0x04])
     }
 
     /// Build channel status request command (0x91)
@@ -725,7 +705,7 @@ impl MC5000Protocol {
     }
 
     /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
-    fn name_suffix(name: &str) -> Option<String> {
+    pub(crate) fn name_suffix(name: &str) -> Option<String> {
         let suffix = name.rsplit(['-', '_', ' ']).next()?;
         (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
             .then(|| suffix.to_ascii_uppercase())
@@ -1379,6 +1359,11 @@ impl ChargeConfig {
 
 #[derive(Debug, Clone)]
 pub struct MC5000DeviceInfo {
+    /// The 16-byte device code from the 0x57 reply (the official app sends it as hex to
+    /// SkyRC's update server).
+    pub code: [u8; 16],
+    /// Code bytes 8-9 as hex: OEM code, "0000" for SkyRC's own brand.
+    pub oem: String,
     /// e.g. "1.82" (code bytes 11-12: major, minor as a decimal number).
     pub firmware_version: String,
     /// The official app reads only the low nibble of code byte 13 (e.g. "1"; the charger's
@@ -1419,6 +1404,8 @@ impl MC5000DeviceInfo {
                 // Greeting packet: 0f 04 06 01 01 08
                 // This is the initial unsolicited notification
                 Ok(MC5000DeviceInfo {
+                    code: [0; 16],
+                    oem: "Unknown".to_string(),
                     firmware_version: "Unknown".to_string(),
                     hardware_version: "Unknown".to_string(),
                     serial_number: "Unknown".to_string(),
@@ -1432,8 +1419,10 @@ impl MC5000DeviceInfo {
                     ));
                 }
                 // The 16 code bytes follow `0f 13 57 00`.
-                let code = &response[4..20];
+                let code: [u8; 16] = response[4..20].try_into().expect("16 bytes");
                 Ok(MC5000DeviceInfo {
+                    code,
+                    oem: format!("{:02X}{:02X}", code[8], code[9]),
                     firmware_version: format!("{}.{:02}", code[11], code[12]),
                     hardware_version: (code[13] & 0x0F).to_string(),
                     serial_number: String::from_utf8_lossy(&code[0..6]).to_string(),
@@ -1446,6 +1435,38 @@ impl MC5000DeviceInfo {
                 ))
             }
         }
+    }
+}
+
+/// The charger's system settings from a 0x96 reply, as raw values: the official app reads
+/// them into its settings screen but their value ranges are not documented. 0x96 only
+/// reads; this client never writes them (0x95).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MC5000SystemSettings {
+    pub system_beep: u8,
+    pub notification_beep: u8,
+    pub end_beep: u8,
+    pub lcd: u8,
+    pub warning: u8,
+    pub sleep: u8,
+}
+
+impl MC5000SystemSettings {
+    /// Parses `0f 09 96 <x> <beep> <notify> <end> <lcd> <warning> <sleep> <sum>`.
+    pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
+        if response.len() < 11 || response[0] != PACKET_START || response[2] != CMD_SYSTEM_SETTINGS {
+            return Err(BluetoothError::CommunicationError(format!(
+                "Not a system settings reply: {response:02X?}"
+            )));
+        }
+        Ok(Self {
+            system_beep: response[4],
+            notification_beep: response[5],
+            end_beep: response[6],
+            lcd: response[7],
+            warning: response[8],
+            sleep: response[9],
+        })
     }
 }
 
@@ -1838,6 +1859,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(info.serial_number, "100214");
+        assert_eq!(info.oem, "0000");
         assert_eq!(info.firmware_version, "1.82");
         assert_eq!(info.hardware_version, "1");
         // The last code byte makes the 16 code bytes sum to 0 mod 256.
@@ -1883,6 +1905,15 @@ mod tests {
         }
     }
 
+    /// A reply read from an MC5000 with firmware 1.83.
+    #[test]
+    fn system_settings_reply_decodes_raw_values() {
+        let s = MC5000SystemSettings::parse_from_response(&hex("0f09960000000001010098")).unwrap();
+        assert_eq!((s.system_beep, s.notification_beep, s.end_beep, s.lcd, s.warning, s.sleep), (0, 0, 0, 1, 1, 0));
+        assert!(MC5000SystemSettings::parse_from_response(&hex("0f0465010167")).is_err());
+        assert_eq!(MC5000Protocol::build_system_settings_query(), hex("0f0396049a"));
+    }
+
     #[test]
     fn a_mode_the_chemistry_lacks_is_refused() {
         for (chemistry, mode) in [
@@ -1922,7 +1953,17 @@ mod tests {
     fn handshake_carries_the_unit_suffix() {
         let packet = MC5000Protocol::build_device_info_command("E56A");
         assert_eq!(&packet[..6], &[0x0F, 0x13, 0x57, 0x00, 0xE5, 0x6A]);
+        assert_eq!(packet.len(), 21, "length byte 0x13 = 19 bytes after it");
         let sum = packet[2..packet.len() - 1].iter().fold(0u8, |a, &b| a.wrapping_add(b));
         assert_eq!(packet[packet.len() - 1], sum);
+    }
+
+    /// The request the official app sent, byte for byte.
+    #[test]
+    fn handshake_matches_the_official_app() {
+        assert_eq!(
+            MC5000Protocol::build_device_info_command("FF34"),
+            hex("0f135700ff343738c1a4000000000000000000005e")
+        );
     }
 }

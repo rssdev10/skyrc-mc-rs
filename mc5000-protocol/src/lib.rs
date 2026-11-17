@@ -20,7 +20,8 @@ pub mod transport;
 pub use bluetooth::{
     BluetoothError, DiscoveredBluetoothDevice, MC5000Protocol,
     BatteryChemistry, ChargeConfig, OperationMode,
-    MC5000SlotStatus, MC5000SlotState, StartStopAction,
+    MC5000DeviceInfo, MC5000SlotStatus, MC5000SlotState, MC5000SystemSettings,
+    StartStopAction,
 };
 pub use session::{ConnectMode, Frame, FrameDecoder, Session, SessionEvent};
 pub use transport::{BleTransport, IncomingBytes, SerialTransport, Transport};

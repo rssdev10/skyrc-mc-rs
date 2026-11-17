@@ -15,8 +15,8 @@
 //! never interleaves with a start/stop sequence.
 
 use crate::bluetooth::{
-    BluetoothError, ChargeConfig, DiscoveredBluetoothDevice, MC5000Protocol, MC5000SlotStatus,
-    StartStopAction,
+    BluetoothError, ChargeConfig, DiscoveredBluetoothDevice, MC5000DeviceInfo, MC5000Protocol,
+    MC5000SlotStatus, MC5000SystemSettings, StartStopAction,
 };
 use crate::transport::{BleTransport, IncomingBytes, Transport};
 use btleplug::api::Peripheral as _;
@@ -518,6 +518,60 @@ impl Session {
         }
     }
 
+    /// Sends `packet` and waits for the first frame whose command is `reply`, sending again
+    /// every 500 ms until `timeout`. Subscribes before sending, so a fast reply is not lost.
+    pub async fn request(
+        &self,
+        packet: &[u8],
+        reply: u8,
+        timeout: Duration,
+    ) -> Result<Frame, BluetoothError> {
+        let mut events = self.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            self.send(packet).await?;
+            let retry_at = deadline.min(tokio::time::Instant::now() + Duration::from_millis(500));
+            loop {
+                match tokio::time::timeout_at(retry_at, events.recv()).await {
+                    Ok(Ok(SessionEvent::Frame(frame))) if frame.command() == reply => {
+                        return Ok(frame)
+                    }
+                    Ok(Ok(SessionEvent::Frame(_))) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                    Ok(Ok(SessionEvent::Disconnected))
+                    | Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        return Err(BluetoothError::ConnectionFailed("Charger disconnected".into()));
+                    }
+                    Err(_) => break,
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(BluetoothError::CommunicationError(format!(
+                    "No 0x{reply:02X} reply within {} ms",
+                    timeout.as_millis()
+                )));
+            }
+        }
+    }
+
+    /// Asks the charger for its device info (0x57): model ID, firmware and hardware
+    /// versions. Read only. The charger answers whatever address the request carries.
+    pub async fn device_info(&self, timeout: Duration) -> Result<MC5000DeviceInfo, BluetoothError> {
+        let suffix = MC5000Protocol::name_suffix(self.name()).unwrap_or_default();
+        let packet = MC5000Protocol::build_device_info_command(&suffix);
+        let frame = self.request(&packet, 0x57, timeout).await?;
+        MC5000DeviceInfo::parse_from_response(frame.bytes())
+    }
+
+    /// Reads the charger's system settings (0x96). Read only.
+    pub async fn system_settings(
+        &self,
+        timeout: Duration,
+    ) -> Result<MC5000SystemSettings, BluetoothError> {
+        let packet = MC5000Protocol::build_system_settings_query();
+        let frame = self.request(&packet, 0x96, timeout).await?;
+        MC5000SystemSettings::parse_from_response(frame.bytes())
+    }
+
     /// Reads all four slots, one after another. Slots that never answer are `None`.
     pub async fn read_all_status(
         &self,
@@ -872,6 +926,10 @@ mod tests {
                     futures::future::pending::<()>().await;
                 }
                 lock(&self.writes).push((Instant::now(), packet.to_vec()));
+                if let (0x57 | 0x96, Some(replies)) = (packet[2], &self.replies) {
+                    let reply = if packet[2] == 0x57 { &INFO_REPLY[..] } else { &SETTINGS_REPLY[..] };
+                    let _ = replies.send(reply.to_vec());
+                }
                 if packet[2] == 0x91 {
                     let dropped = self
                         .drop_requests
@@ -919,6 +977,34 @@ mod tests {
 
     fn commands(writes: &Writes) -> Vec<u8> {
         lock(writes).iter().map(|(_, packet)| packet[2]).collect()
+    }
+
+    /// Replies read from an MC5000 with firmware 1.83.
+    const INFO_REPLY: [u8; 21] = [
+        0x0F, 0x13, 0x57, 0x00, 0x31, 0x30, 0x30, 0x32, 0x31, 0x34, 0x04, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x53, 0x01, 0x00, 0x7F, 0x57,
+    ];
+    const SETTINGS_REPLY: [u8; 11] = [0x0F, 0x09, 0x96, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x98];
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn device_info_and_settings_are_read_from_their_replies() {
+        let (session, writes) = fake_session(0);
+        session.start_polling(Duration::from_millis(10)); // status frames arrive in between
+        let info = session.device_info(Duration::from_secs(2)).await.unwrap();
+        assert_eq!((info.serial_number.as_str(), info.firmware_version.as_str()), ("100214", "1.83"));
+        let settings = session.system_settings(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(settings.lcd, 1);
+        session.stop_polling();
+        let sent = commands(&writes);
+        assert!(sent.contains(&0x57) && sent.contains(&0x96));
+        assert!(!sent.iter().any(|c| matches!(c, 0x94 | 0xFE | 0x93 | 0x74 | 0x65)), "read only: {sent:02X?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_without_reply_times_out() {
+        let (session, _) = fake_session(0);
+        let err = session.request(&[0x0F, 0x03, 0x99, 0x00, 0x99], 0x99, Duration::from_millis(600)).await;
+        assert!(err.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

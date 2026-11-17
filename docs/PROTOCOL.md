@@ -112,7 +112,9 @@ a firmware update). The app ignores it too.
 - `57` = Command
 - `00` = Always 0
 - `ff 34 37 38 c1 a4` = the charger's BLE MAC address, least significant byte first
-  (here `A4:C1:38:37:34:FF`) (app)
+  (here `A4:C1:38:37:34:FF`) (app). The charger does not check it: requests with a wrong or
+  an all-zero address got the same reply (verified live). The frame must be exactly 21 bytes;
+  an earlier version of this client sent a 22-byte frame, which the charger ignored.
 - `00...00` = Padding to 17 payload bytes
 - `5e` = Checksum
 
@@ -450,7 +452,9 @@ only the lowest slot (live), so stop several slots with one FE each.
 | 8 | Warning setting |
 | 9 | Sleep time |
 
-Captured replies: `0f 09 96 01 00 00 00 01 01 00 99` and `0f 09 96 08 00 01 00 01 01 00 a1`.
+Captured replies: `0f 09 96 01 00 00 00 01 01 00 99`, `0f 09 96 08 00 01 00 01 01 00 a1` and,
+read live on firmware 1.83, `0f 09 96 00 00 00 00 01 01 00 98`. `charger-cli info` prints these
+values raw: their value ranges are not documented.
 
 0x95 writes the same settings: payload `00 <beep> <notify> <end> <lcd> <warning> <sleep> <mode>`
 padded to 17 bytes; reply byte 4 `01` = accepted (app). This client never sends it.
@@ -514,8 +518,9 @@ so a firmware that sends longer status frames still decodes.
 - A 0x91 request with mask `0x0F` returns a single frame, so each slot needs its own request.
 - Requests sent too close together are silently dropped. Share of 0x91 requests answered, by
   gap between requests: 0 ms ≈ 30 %, 10–50 ms ≈ 65–85 %, 100–150 ms ≈ 95–98 %.
-- The 0x57 handshake was not answered by the tested unit (its 0x74, 0x65 and 0xFE replies were:
-  `0f 04 74 01 01 76`, `0f 04 65 01 01 67`, `0f 04 fe 10 01 0f`).
+- 0x57 is answered once the request is a well-formed 21-byte frame; on firmware 1.83 the reply
+  was `0f 13 57 00 31 30 30 32 31 34 04 00 00 00 00 01 53 01 00 7f 57`. Other replies:
+  `0f 04 74 01 01 76`, `0f 04 65 01 01 67`, `0f 04 fe 10 01 0f`.
 
 `Session` therefore keeps writes at least 120 ms apart, polls one slot at a time, and re-requests
 slots that did not answer.
