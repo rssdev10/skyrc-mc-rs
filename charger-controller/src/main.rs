@@ -142,7 +142,8 @@ fn script_for(command: &Commands) -> Result<Option<Vec<String>>, String> {
             script.push(format!(
                 "start {slot} chemistry={chemistry} mode=charge current={current} capacity={capacity}"
             ));
-            script.extend(["wait 4".into(), "state".into()]);
+            // The charger confirms the start in its status (a timeout exits with status 1).
+            script.extend([format!("wait-until slot {slot} running 20"), "state".into()]);
         }
         Commands::Stop { slot } => {
             script.extend(connect_steps());
@@ -150,14 +151,15 @@ fn script_for(command: &Commands) -> Result<Option<Vec<String>>, String> {
                 Some(slot) => {
                     check_slot(*slot)?;
                     script.push(format!("stop {slot}"));
+                    script.push(format!("wait-until slot {slot} idle 20"));
                 }
-                None => script.push("stop".into()),
+                None => script.extend(["stop".into(), "wait-until all idle 20".into()]),
             }
-            script.extend(["wait 3".into(), "state".into()]);
+            script.push("state".into());
         }
         Commands::Auto => {
             script.extend(connect_steps());
-            script.extend(["auto".into(), "wait 5".into(), "state".into()]);
+            script.extend(["auto".into(), "wait-until settled 30".into(), "state".into()]);
         }
     }
     script.push("quit".into());
@@ -298,6 +300,30 @@ fn load_icon() -> Option<window::Icon> {
         Err(e) => {
             eprintln!("Warning: Failed to load icon image: {}", e);
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script(command: Commands) -> Vec<String> {
+        script_for(&command).unwrap().unwrap()
+    }
+
+    #[test]
+    fn presets_wait_for_the_charger_instead_of_sleeping() {
+        let start = script(Commands::Start { slot: 2, chemistry: "nimh".into(), current: 200, capacity: 2000 });
+        assert!(start.contains(&"wait-until slot 2 running 20".to_string()));
+        let stop = script(Commands::Stop { slot: Some(3) });
+        assert!(stop.contains(&"wait-until slot 3 idle 20".to_string()));
+        let stop_all = script(Commands::Stop { slot: None });
+        assert!(stop_all.contains(&"wait-until all idle 20".to_string()));
+        let auto = script(Commands::Auto);
+        assert!(auto.contains(&"wait-until settled 30".to_string()));
+        for preset in [start, stop, stop_all, auto] {
+            assert!(!preset.iter().any(|line| line.starts_with("wait ")), "{preset:?}");
         }
     }
 }

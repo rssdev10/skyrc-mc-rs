@@ -163,13 +163,10 @@ impl Slot {
         }
     }
 
+    /// Records the task sent to the charger. The state changes only when the charger's
+    /// status reports the slot running.
     pub fn start_task(&mut self, config: TaskConfig) {
         self.current_task = Some(config.clone());
-        self.state = match config.task_type {
-            TaskType::Charge => SlotState::Charging,
-            TaskType::Discharge => SlotState::Discharging,
-            _ => SlotState::Charging, // Default to charging for other types
-        };
         self.start_time = Some(Instant::now());
         self.last_update = Some(Instant::now());
         

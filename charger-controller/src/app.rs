@@ -146,6 +146,10 @@ pub struct ChargerApp {
     pending_stop: u8,
     /// Start and stop command sequences sent to the session whose result has not arrived.
     commands_in_flight: u32,
+    /// Control-channel commands processed (published in the snapshot; see `control.rs`).
+    control_seq: u64,
+    /// Slots whose program is being re-sent (see [`Restart`]).
+    restarts: [Option<Restart>; 4],
     /// Set by [`AppMessage::QuitRequested`] while commands are in flight: exit when they
     /// finish, or at this deadline.
     quit_deadline: Option<Instant>,
@@ -190,6 +194,19 @@ struct SmartProbe {
 const SMART_PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 /// Charger-reported run time before the resistance reading is trusted.
 const SMART_PROBE_SETTLE_S: u32 = 5;
+/// A program re-sent to a running slot (Smart switching from its probe to the chosen
+/// current). The charger stops the old program and starts the new one, so it reports the slot
+/// idle in between; that idle is not shown.
+#[derive(Debug, Clone, Copy)]
+struct Restart {
+    since: Instant,
+    /// The restart command has reached the charger.
+    sent: bool,
+}
+
+/// How long a slot counts as waiting for the charger to confirm a start or stop (the same
+/// fallback after which the view re-enables its buttons).
+const COMMAND_CONFIRM_WAIT: Duration = Duration::from_secs(10);
 
 /// What a background command did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +347,8 @@ impl ChargerApp {
             last_device: None,
             pending_stop: 0,
             commands_in_flight: 0,
+            control_seq: 0,
+            restarts: [None; 4],
             quit_deadline: None,
             slot_notices: [None, None, None, None],
             slot_error_codes: [0; 4],
@@ -450,10 +469,11 @@ impl ChargerApp {
                 "chemistry": format!("{chemistry:?}"),
                 "current_ma": config.charge_current_ma,
             }));
+            // The state changes when the charger reports the slot running.
+            self.slot_command_pending[idx] = Some((Instant::now(), self.slots[idx].state.clone()));
             let slot = &mut self.slots[idx];
             slot.current_task = Some(task.clone());
             slot.start_time = Some(Instant::now());
-            slot.state = SlotState::Charging;
             self.slot_configs[idx] = Some(task);
             self.slot_notices[idx] = None;
             self.smart_probes[idx] = smart.then(|| SmartProbe { chemistry, started: Instant::now() });
@@ -523,6 +543,7 @@ impl ChargerApp {
                 self.slots[idx].current_task = Some(task.clone());
                 self.slot_configs[idx] = Some(task);
                 let keep_running = self.active_mask_except(slot_bit);
+                self.restarts[idx] = Some(Restart { since: Instant::now(), sent: false });
                 self.run_command(slot_bit, move |session| async move {
                     session.start_slots(&[config], keep_running).await
                 })
@@ -705,6 +726,8 @@ impl ChargerApp {
                 .as_ref()
                 .and(self.pending_slot)
                 .map(|s| s.0 + 1),
+            commands_in_flight: self.commands_in_flight,
+            control_seq: self.control_seq,
             slots: self
                 .slots
                 .iter()
@@ -727,6 +750,10 @@ impl ChargerApp {
                     capacity_mah: slot.capacity_mah,
                     resistance_mohm: slot.resistance_milliohm,
                     elapsed_s: slot.elapsed_seconds,
+                    awaiting_charger: self.restarts[i].is_some()
+                        || self.slot_command_pending[i]
+                            .as_ref()
+                            .is_some_and(|(at, _)| at.elapsed() < COMMAND_CONFIRM_WAIT),
                     temperature_c: slot.temperature_c,
                     charger_error: Some(self.slot_error_codes[i]).filter(|&code| code != 0),
                     task: slot.current_task.as_ref().map(|t| t.task_type.to_string()),
@@ -949,13 +976,24 @@ impl ChargerApp {
                                     }
                                 }
                             }
-                            // Don't downgrade from active to Idle within 10s of starting
-                            // (device may report 0 current briefly during ramp-up).
-                            let should_protect = slot.is_active()
-                                && new_state == SlotState::Idle
-                                && slot.start_time.map(|t| t.elapsed().as_secs() < 10).unwrap_or(false);
-                            if !should_protect {
-                                slot.set_state(new_state);
+                            // The charger's phase byte is authoritative: a program it ends at once
+                            // (e.g. battery type error) shows as idle at once. Only the idle in
+                            // the middle of a restart is not shown.
+                            let running = matches!(
+                                new_state,
+                                SlotState::Charging | SlotState::Discharging | SlotState::Paused
+                            );
+                            match self.restarts[slot_idx] {
+                                Some(restart) if restart.since.elapsed() >= COMMAND_CONFIRM_WAIT => {
+                                    self.restarts[slot_idx] = None;
+                                    slot.set_state(new_state);
+                                }
+                                Some(restart) if restart.sent && running => {
+                                    self.restarts[slot_idx] = None;
+                                    slot.set_state(new_state);
+                                }
+                                Some(_) if !running => {}
+                                _ => slot.set_state(new_state),
                             }
                         }
 
@@ -1136,6 +1174,7 @@ impl ChargerApp {
             }
 
             AppMessage::ConnectionLost => {
+                self.restarts = [None; 4];
                 if self.session.take().is_none() {
                     return Task::none();
                 }
@@ -1188,6 +1227,16 @@ impl ChargerApp {
 
             AppMessage::CommandFinished(kind, slots, result) => {
                 self.commands_in_flight = self.commands_in_flight.saturating_sub(1);
+                if kind == CommandKind::Start {
+                    for (i, restart) in self.restarts.iter_mut().enumerate() {
+                        if slots & (1 << i) != 0 {
+                            *restart = match (restart.take(), result.is_ok()) {
+                                (Some(r), true) => Some(Restart { sent: true, ..r }),
+                                _ => None,
+                            };
+                        }
+                    }
+                }
                 self.emit("event", serde_json::json!({
                     "event": "command_finished",
                     "command": format!("{kind:?}").to_lowercase(),
@@ -1229,6 +1278,7 @@ impl ChargerApp {
             }
 
             AppMessage::DisconnectDevice => {
+                self.restarts = [None; 4];
                 self.connection_status = ConnectionStatus::Disconnected;
                 self.status_seen = [false; 4];
                 for slot in &mut self.slots {
@@ -1285,6 +1335,7 @@ impl ChargerApp {
                     println!("[STOP-SLOT] Stopping slot {}", slot_id.0 + 1);
                 }
                 let task = self.stop_command(slot_bit);
+                self.restarts[slot_id.0] = None;
 
                 // The charger decides when the slot is idle: keep its state until a status
                 // says so (the Stop button stays disabled meanwhile).
@@ -1303,6 +1354,7 @@ impl ChargerApp {
                     println!("[STOP-ALL] Stopping all slots");
                 }
                 let task = self.stop_command(0x0F);
+                self.restarts = [None; 4];
 
                 // States change when the charger reports the slots idle.
                 for (i, slot) in self.slots.iter_mut().enumerate() {
@@ -1762,10 +1814,8 @@ impl ChargerApp {
                             if verbose {
                                 println!("[GUI VERBOSE] Sending config + start (mask 0x{:02X})", keep_running | slot_bit);
                             }
-                            // Shown as charging now; a failed command sets the slot to Error.
-                            if let Some(slot) = self.slots.get_mut(slot_id.0) {
-                                slot.state = SlotState::Charging;
-                            }
+                            // The slot shows running when the charger reports it (Configure stays
+                            // disabled until then); a failed command sets the slot to Error.
                             self.slot_notices[slot_id.0] = None;
                             return self.run_command(slot_bit, move |session| async move {
                                 session.start_slots(&[bt_config], keep_running).await
@@ -1914,7 +1964,10 @@ impl ChargerApp {
                 Task::none()
             }
 
-            AppMessage::Control(line) => self.handle_control(&line),
+            AppMessage::Control(line) => {
+                self.control_seq += 1;
+                self.handle_control(&line)
+            }
         }
     }
 
@@ -2403,6 +2456,104 @@ mod tests {
         assert_eq!(app.pending_stop, 0x0F, "delivered on the next connection");
         assert_eq!(app.slots[1].state, SlotState::Charging, "not idle until the charger says so");
         assert!(app.slot_command_pending[1].is_some(), "Stop stays disabled meanwhile");
+    }
+
+    #[test]
+    fn test_started_slot_shows_running_only_when_the_charger_reports_it() {
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        let task = TaskConfig::default();
+        app.slot_command_pending[1] = Some((Instant::now(), app.slots[1].state.clone()));
+        let _ = app.update(AppMessage::StartTask(SlotId(1), task));
+        assert_eq!(app.slots[1].state, SlotState::Idle, "not running until the charger says so");
+        assert!(app.slots[1].current_task.is_some());
+        assert!(app.snapshot().slots[1].awaiting_charger);
+
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 200)));
+        assert_eq!(app.slots[1].state, SlotState::Charging);
+        assert!(!app.snapshot().slots[1].awaiting_charger);
+
+        // A program the charger ends at once shows as idle at once (no grace period).
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        assert_eq!(app.slots[1].state, SlotState::Idle);
+    }
+
+    /// A charger that accepts every write and never answers: enough for code paths that
+    /// need a session but not a reply.
+    struct SilentCharger;
+
+    impl mc5000_protocol::Transport for SilentCharger {
+        fn write<'a>(
+            &'a self,
+            _packet: &'a [u8],
+        ) -> futures::future::BoxFuture<'a, Result<(), mc5000_protocol::BluetoothError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn is_connected(&self) -> futures::future::BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), mc5000_protocol::BluetoothError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn silent_session() -> Session {
+        use futures::StreamExt;
+        Session::open(SilentCharger, futures::stream::pending().boxed(), "#Charger-TEST", "test")
+    }
+
+    #[tokio::test]
+    async fn test_confirm_starts_without_marking_the_slot_running() {
+        let mut app = create_test_app();
+        app.session = Some(silent_session());
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        app.pending_slot = Some(SlotId(1));
+        app.config_dialog_state = Some(crate::ui::components::config_dialog::ConfigDialogState::new(1.3));
+        let _ = app.update(AppMessage::ConfigChemistryChanged(BatteryChemistry::NiMH));
+        let _ = app.update(AppMessage::ConfigDialogConfirm);
+        assert!(app.config_dialog_state.is_none(), "dialog confirmed");
+        assert_eq!(app.slots[1].state, SlotState::Idle, "not running until the charger says so");
+        assert!(app.slot_command_pending[1].is_some());
+    }
+
+    #[test]
+    fn test_smart_restart_does_not_show_the_idle_in_between() {
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 200)));
+        assert_eq!(app.slots[1].state, SlotState::Charging);
+        app.restarts[1] = Some(Restart { since: Instant::now(), sent: false });
+        app.commands_in_flight = 1;
+        assert!(app.snapshot().slots[1].awaiting_charger);
+
+        // The charger stops the probe program before starting the chosen one.
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        assert_eq!(app.slots[1].state, SlotState::Charging, "restart gap hidden");
+
+        let _ = app.update(AppMessage::CommandFinished(CommandKind::Start, 0x02, Ok(())));
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        assert_eq!(app.slots[1].state, SlotState::Charging, "still between programs");
+
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 250)));
+        assert!(app.restarts[1].is_none(), "restart done");
+        assert!(!app.snapshot().slots[1].awaiting_charger);
+
+        // Afterwards an idle report shows at once.
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        assert_eq!(app.slots[1].state, SlotState::Idle);
+    }
+
+    #[test]
+    fn test_restart_gives_up_after_the_wait_and_on_stop() {
+        let mut app = create_test_app();
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 200)));
+        app.restarts[1] = Some(Restart { since: Instant::now() - COMMAND_CONFIRM_WAIT, sent: true });
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 0)));
+        assert_eq!(app.slots[1].state, SlotState::Idle, "charger did not restart: shown");
+
+        let _ = app.update(AppMessage::StatusReceived(status(2, 1300, 200)));
+        app.restarts[1] = Some(Restart { since: Instant::now(), sent: false });
+        let _ = app.update(AppMessage::StopTask(SlotId(1)));
+        assert!(app.restarts[1].is_none(), "a stop is never hidden");
     }
 
     #[test]

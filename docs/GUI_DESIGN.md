@@ -92,8 +92,12 @@ the affected slots to `Error`.
   slot's measured voltage cannot belong to the chosen chemistry (for example NiMH settings on
   a 4.1 V cell). Completion is reported by the charger, never inferred by the GUI.
 - Configure & Start and Stop buttons are disabled until the device confirms status via notification.
-- Stop never marks a slot idle by itself: the slot keeps its state, with Stop disabled, until the
-  charger's status reports it idle. A stop that cannot be delivered is queued and sent first on
+- Start and Stop never change a slot's state by themselves: the slot keeps its state, with its
+  buttons disabled (for at most 10 s), until the charger's status reports it running or idle.
+  A program the charger ends at once (e.g. battery type error) shows as idle at once.
+  When Smart switches a slot from its probe to the chosen current, the charger stops and
+  restarts the program; the idle report in between is not shown (for at most 10 s, and never
+  after a Stop). A stop that cannot be delivered is queued and sent first on
   the next connection.
 - Closing the window (or `quit` on the control channel) waits up to 20 s for commands still on
   their way to the charger, so a stop just pressed is delivered before the app disconnects. If

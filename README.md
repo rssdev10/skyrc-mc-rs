@@ -260,8 +260,11 @@ presses Confirm), so the GUI's own state machine, tasks and BLE session are what
 Feedback is one JSON object per line on stdout: `state` snapshots, `event`s (`connected`,
 `connect_failed`, `connection_lost`, `command_finished`, `scanned`, `quit_waiting`,
 `stop_not_delivered`), `ack`s and `error`s. A failed `wait-until` makes the process exit with
-status 1. After `stop`, `wait-until slot <n> idle` returns only once the charger reports the slot
-idle, and `quit` waits for commands still on their way to the charger.
+status 1. Slot states follow the charger's own status, so waits confirm what the charger did:
+`wait-until slot <n> running` after a start, `wait-until slot <n> idle` (or `all idle`) after a
+stop, and `wait-until settled` once every start and stop has been confirmed. `quit` waits for
+commands still on their way to the charger. The `start`, `stop` and `auto` subcommands use these
+waits instead of fixed delays.
 
 ```bash
 charger-controller -H status          # connect, print one state snapshot, quit

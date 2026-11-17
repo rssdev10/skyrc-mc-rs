@@ -40,7 +40,8 @@ Commands (one per line):
   wait <seconds>               pause the script
   wait-until <condition> [s]   pause until a condition holds (default timeout 30 s):
                                scanned | connected | disconnected | readings |
-                               slot <n> <state>
+                               slot <n> <state> | slot <n> running | all idle |
+                               settled (every start/stop confirmed by the charger)
   watch <seconds> [count]      print the state every <seconds>
   quit                         exit
   help                         this text
@@ -78,6 +79,12 @@ pub struct Snapshot {
     pub selected_device: Option<String>,
     pub connected_to: Option<String>,
     pub dialog_slot: Option<usize>,
+    /// Start/stop command sequences on their way to the charger.
+    pub commands_in_flight: u32,
+    /// Control commands the app has processed. Waits compare it with the number of commands
+    /// sent, so they never look at a state from before the previous command.
+    #[serde(skip)]
+    pub control_seq: u64,
     pub slots: Vec<SlotSnapshot>,
 }
 
@@ -95,6 +102,9 @@ pub struct SlotSnapshot {
     pub capacity_mah: u32,
     pub resistance_mohm: u16,
     pub elapsed_s: u32,
+    /// A start or stop was sent and the charger has not reported the change yet (for at
+    /// most 10 s).
+    pub awaiting_charger: bool,
     /// Battery temperature the charger reports (°C); 0 = no reading.
     pub temperature_c: u16,
     /// The charger's error code for the slot (status byte 20), when not 0.
@@ -235,6 +245,27 @@ struct StreamState {
     snapshots: watch::Receiver<Snapshot>,
     quit_at_end: bool,
     done: bool,
+    /// Control commands handed to the app so far.
+    sent: u64,
+}
+
+impl StreamState {
+    /// Hands `line` to the app.
+    fn send(mut self, line: String) -> Option<(AppMessage, StreamState)> {
+        self.sent += 1;
+        Some((AppMessage::Control(line), self))
+    }
+
+    /// Waits until the app has processed every command sent so far, so a following wait
+    /// sees their effect (e.g. `auto` then `wait-until settled`).
+    async fn catch_up(&mut self) {
+        let sent = self.sent;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.snapshots.wait_for(|s| s.control_seq >= sent),
+        )
+        .await;
+    }
 }
 
 /// Reads commands and yields them as [`AppMessage::Control`]. Timing commands (`wait`,
@@ -251,6 +282,7 @@ pub fn control_stream(
         snapshots: subscription.snapshots.clone(),
         quit_at_end: subscription.options.quit_at_end,
         done: false,
+        sent: 0,
     };
     futures::stream::unfold(state, |mut state| async move {
         if state.done {
@@ -259,16 +291,18 @@ pub fn control_stream(
         loop {
             let Some(line) = state.input.next_line().await else {
                 state.done = true;
-                return state
-                    .quit_at_end
-                    .then(|| (AppMessage::Control("quit".into()), state));
+                return if state.quit_at_end { state.send("quit".into()) } else { None };
             };
             let line = line.trim().to_string();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let mut words = line.split_whitespace();
-            match words.next() {
+            let command = words.next();
+            if matches!(command, Some("wait" | "wait-until" | "watch")) {
+                state.catch_up().await;
+            }
+            match command {
                 Some("wait") => {
                     let seconds = words
                         .next()
@@ -283,7 +317,7 @@ pub fn control_stream(
                         emit_error(&format!("timed out: {line}"));
                         if state.quit_at_end {
                             state.done = true;
-                            return Some((AppMessage::Control("quit".into()), state));
+                            return state.send("quit".into());
                         }
                     } else {
                         emit("ack", serde_json::json!({ "command": line }));
@@ -304,12 +338,22 @@ pub fn control_stream(
                 }
                 Some("quit" | "exit") => {
                     state.done = true;
-                    return Some((AppMessage::Control(line), state));
+                    return state.send(line);
                 }
-                _ => return Some((AppMessage::Control(line), state)),
+                _ => return state.send(line),
             }
         }
     })
+}
+
+fn slot<'a>(s: &'a Snapshot, n: &str) -> Option<&'a SlotSnapshot> {
+    n.parse::<usize>().ok().and_then(|n| s.slots.get(n.wrapping_sub(1)))
+}
+
+/// A program runs on the slot (charging, discharging or resting between stages), as the
+/// charger reports it.
+fn is_running(slot: &SlotSnapshot) -> bool {
+    matches!(slot.state.as_str(), "charging" | "discharging" | "paused")
 }
 
 /// Waits until `condition` holds in the published snapshots, or its timeout passes.
@@ -327,11 +371,13 @@ async fn wait_until(snapshots: &mut watch::Receiver<Snapshot>, condition: &[&str
             ["connected"] => s.connection == "connected",
             ["disconnected"] => s.connection != "connected" && s.connection != "connecting",
             ["readings"] => s.slots.iter().all(|slot| slot.seen),
-            ["slot", n, state] => n
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| s.slots.get(n.wrapping_sub(1)))
-                .is_some_and(|slot| slot.state.eq_ignore_ascii_case(state)),
+            // Every command has reached the charger and every slot shows its outcome.
+            ["settled"] => {
+                s.commands_in_flight == 0 && s.slots.iter().all(|slot| !slot.awaiting_charger)
+            }
+            ["all", "idle"] => s.slots.iter().all(|slot| slot.seen && !is_running(slot)),
+            ["slot", n, "running"] => slot(s, n).is_some_and(is_running),
+            ["slot", n, state] => slot(s, n).is_some_and(|slot| slot.state.eq_ignore_ascii_case(state)),
             _ => false,
         }
     };
@@ -428,5 +474,75 @@ mod tests {
         let (_tx, mut rx) = watch::channel(snapshot(false, "connected", "charging"));
         assert!(wait_until(&mut rx, &["slot", "4", "Charging", "1"]).await);
         assert!(!wait_until(&mut rx, &["slot", "3", "charging", "0.05"]).await);
+    }
+
+    #[tokio::test]
+    async fn running_covers_every_active_state() {
+        for state in ["charging", "discharging", "paused"] {
+            let (_tx, mut rx) = watch::channel(snapshot(false, "connected", state));
+            assert!(wait_until(&mut rx, &["slot", "4", "running", "0.05"]).await, "{state}");
+            assert!(!wait_until(&mut rx, &["all", "idle", "0.05"]).await, "{state}");
+        }
+        let (_tx, mut rx) = watch::channel(snapshot(false, "connected", "completed"));
+        assert!(!wait_until(&mut rx, &["slot", "4", "running", "0.05"]).await);
+        assert!(wait_until(&mut rx, &["all", "idle", "0.05"]).await);
+    }
+
+    #[tokio::test]
+    async fn all_idle_needs_every_slot_reported() {
+        let mut s = snapshot(false, "connected", "idle");
+        s.slots[2].seen = false;
+        let (_tx, mut rx) = watch::channel(s);
+        assert!(!wait_until(&mut rx, &["all", "idle", "0.05"]).await);
+    }
+
+    /// `auto` then `wait-until settled`: the wait must not pass on the snapshot from before
+    /// the app processed `auto` (nothing in flight yet), only once the app has caught up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waits_do_not_run_ahead_of_the_app() {
+        use futures::StreamExt;
+        let (tx, rx) = watch::channel(snapshot(false, "connected", "idle"));
+        let subscription = ControlSubscription {
+            options: ControlOptions {
+                source: Source::Script(Arc::new(vec!["auto".into(), "wait-until settled 5".into(), "state".into()])),
+                quit_at_end: false,
+            },
+            snapshots: rx,
+        };
+        let mut stream = Box::pin(control_stream(&subscription));
+        assert!(matches!(stream.next().await, Some(AppMessage::Control(line)) if line == "auto"));
+
+        // The next message comes only after the wait. Let it start, then let the app
+        // "process" auto: one command in flight, so not settled yet.
+        let next = tokio::spawn(async move { stream.next().await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!next.is_finished(), "settled must not pass before the app processed auto");
+        let mut busy = snapshot(false, "connected", "idle");
+        busy.control_seq = 1;
+        busy.commands_in_flight = 1;
+        tx.send_replace(busy.clone());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!next.is_finished(), "a command is still in flight");
+
+        busy.commands_in_flight = 0;
+        tx.send_replace(busy);
+        tokio::time::timeout(Duration::from_secs(2), next).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn settled_waits_for_commands_and_charger_confirmations() {
+        let mut busy = snapshot(false, "connected", "idle");
+        busy.commands_in_flight = 1;
+        let (tx, mut rx) = watch::channel(busy.clone());
+        assert!(!wait_until(&mut rx, &["settled", "0.05"]).await);
+
+        busy.commands_in_flight = 0;
+        busy.slots[1].awaiting_charger = true; // sent, not yet reported by the charger
+        tx.send_replace(busy.clone());
+        assert!(!wait_until(&mut rx, &["settled", "0.05"]).await);
+
+        busy.slots[1].awaiting_charger = false;
+        tx.send_replace(busy);
+        assert!(wait_until(&mut rx, &["settled", "0.05"]).await);
     }
 }
