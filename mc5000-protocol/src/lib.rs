@@ -14,6 +14,7 @@
 //!   placeholder is ready for when that protocol is known.
 
 pub mod bluetooth;
+pub mod charging;
 pub mod session;
 pub mod transport;
 

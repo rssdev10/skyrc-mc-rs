@@ -18,50 +18,15 @@ use crate::config_dialog::{ChargeConfig as DialogConfig, ChargeMode};
 use crate::slot::{BatteryChemistry, TaskConfig, TaskType};
 use mc5000_protocol::{ChargeConfig, OperationMode};
 
-/// At or above this resting voltage a cell is taken for Li-Ion (4.20 V target).
-/// LiFePO4 never rests this high, and Li-Ion HV cannot be told apart, so it is not chosen.
-pub const LI_ION_MIN_V: f32 = 3.7;
-/// Below this resting voltage (and above an empty slot) a cell is taken for NiMH.
-/// Above it, a full NiMH cell and a non-rechargeable alkaline cell look the same.
-pub const NIMH_MAX_V: f32 = 1.5;
-/// Below this the slot is treated as empty.
-pub const EMPTY_V: f32 = 0.1;
-
-/// Why unattended detection skips a cell.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SkipReason {
-    Empty,
-    /// The voltage fits several chemistries (LiFePO4, depleted Li-Ion, LTO, NiZn, or a
-    /// non-rechargeable cell).
-    Ambiguous {
-        voltage: f32,
-    },
-}
-
-impl std::fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkipReason::Empty => write!(f, "empty slot"),
-            SkipReason::Ambiguous { voltage } => write!(
-                f,
-                "{voltage:.2} V is ambiguous (LiFePO4, depleted Li-Ion, LTO, NiZn or a \
-                 non-rechargeable cell); configure this slot manually"
-            ),
-        }
-    }
-}
+// Detection, Auto's current and Smart's rules are shared with the CLI
+// (`mc5000_protocol::charging`); these wrappers take the GUI's chemistry type.
+pub use mc5000_protocol::charging::{
+    SkipReason, SmartCurrent, SmartRefusal, AUTO_CURRENT_MA, EMPTY_V, LI_ION_MIN_V,
+};
 
 /// Detection for unattended charging: the chemistry, or why the cell is skipped.
 pub fn detect_chemistry(voltage_v: f32) -> Result<BatteryChemistry, SkipReason> {
-    if voltage_v < EMPTY_V {
-        Err(SkipReason::Empty)
-    } else if voltage_v >= LI_ION_MIN_V {
-        Ok(BatteryChemistry::LiIon)
-    } else if voltage_v < NIMH_MAX_V {
-        Ok(BatteryChemistry::NiMH)
-    } else {
-        Err(SkipReason::Ambiguous { voltage: voltage_v })
-    }
+    mc5000_protocol::charging::detect_chemistry(voltage_v).map(BatteryChemistry::from_bluetooth_chemistry)
 }
 
 /// Suggestion for the Configure dialog, which the user reviews. Where the voltage is
@@ -79,111 +44,18 @@ pub fn suggest_chemistry(voltage_v: f32) -> BatteryChemistry {
     }
 }
 
-fn is_nickel(chemistry: BatteryChemistry) -> bool {
-    matches!(
-        chemistry,
-        BatteryChemistry::NiMH | BatteryChemistry::NiCd | BatteryChemistry::Eneloop
-    )
-}
-
-/// Auto's charge current for every chemistry: a moderate fixed current for starting
-/// right away. The Configure dialog lets the user choose; Smart measures the cell first.
-pub const AUTO_CURRENT_MA: u16 = 500;
-
-/// Current of Smart's measuring probe: low enough for the smallest cell of the family.
+/// Current of Smart's measuring probe.
 pub fn probe_current_ma(chemistry: BatteryChemistry) -> u16 {
-    if is_nickel(chemistry) {
-        200
-    } else {
-        300
-    }
+    mc5000_protocol::charging::probe_current_ma(chemistry.to_bluetooth_chemistry())
 }
 
-/// Voltage the charge current may add across the cell's internal resistance.
-const MAX_IR_DROP_MV: u32 = 100;
-
-/// Below this resistance a lithium cell is taken for a large (21700/26650-class) cell.
-/// Measured on a live charger: a high-current 21700 read 17 mΩ, an 18650 33 mΩ.
-pub const LARGE_LITHIUM_MAX_MOHM: u16 = 25;
-
-/// Above this resistance a nickel cell is charged only at the minimum current and flagged
-/// as worn. Measured on a live charger: healthy-ish AA/AAA cells read 130–490 mΩ, a worn AA
-/// 548 mΩ (the reading includes contact resistance).
-pub const NICKEL_WORN_MOHM: u16 = 500;
-/// Above this resistance a nickel cell is not charged: likely broken or not rechargeable.
-pub const NICKEL_MAX_MOHM: u16 = 1000;
-/// Above this resistance a lithium cell is not charged.
-pub const LITHIUM_MAX_MOHM: u16 = 300;
-
-/// Smart's choice for a measured cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SmartCurrent {
-    pub current_ma: u16,
-    /// High resistance: charged gently at the minimum current; the user should know.
-    pub worn: bool,
-}
-
-/// Why Smart does not charge a measured cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SmartRefusal {
-    NotMeasured,
-    TooResistive { resistance_mohm: u16 },
-}
-
-impl std::fmt::Display for SmartRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SmartRefusal::NotMeasured => write!(f, "internal resistance was not measured"),
-            SmartRefusal::TooResistive { resistance_mohm } => write!(
-                f,
-                "internal resistance {resistance_mohm} mΩ is too high (broken or not rechargeable)"
-            ),
-        }
-    }
-}
-
-/// Smart's charge current for a cell with `resistance_mohm`, or why it is not charged.
-///
-/// The ceiling is about 0.5 C of the smallest common cell the reading allows:
-///
-/// - nickel: 400 mA (an ~800 mAh AAA). The charger's reading includes contact resistance
-///   and reflects condition more than size (a small AAA read 155–175 mΩ, worn AA cells
-///   340–550 mΩ), so it never raises the nickel current. Cells above 500 mΩ are charged
-///   at the 200 mA minimum and flagged as worn; above 1000 mΩ they are refused;
-/// - lithium: 2000 mA below 25 mΩ (21700/26650 class, ≥ 4000 mAh), otherwise 1000 mA
-///   (18650 class). For lithium cells the reading does track size. Above 300 mΩ refused.
-///
-/// Below the ceiling, the current keeps the voltage across the internal resistance near
-/// 100 mV, so small or worn cells get less. Floors: 200 mA nickel, 300 mA lithium. The
-/// result is rounded down to 50 mA.
+/// Smart's charge current for a cell with `resistance_mohm`, or why it is not charged
+/// (rules: `mc5000_protocol::charging::smart_current_ma`).
 pub fn smart_current_ma(
     chemistry: BatteryChemistry,
     resistance_mohm: u16,
 ) -> Result<SmartCurrent, SmartRefusal> {
-    if resistance_mohm == 0 {
-        return Err(SmartRefusal::NotMeasured);
-    }
-    let nickel = is_nickel(chemistry);
-    let (min, max, max_resistance) = if nickel {
-        (200, 400, NICKEL_MAX_MOHM)
-    } else if resistance_mohm < LARGE_LITHIUM_MAX_MOHM {
-        (300, 2000, LITHIUM_MAX_MOHM)
-    } else {
-        (300, 1000, LITHIUM_MAX_MOHM)
-    };
-    if resistance_mohm > max_resistance {
-        return Err(SmartRefusal::TooResistive { resistance_mohm });
-    }
-    let worn = nickel && resistance_mohm > NICKEL_WORN_MOHM;
-    let current = if worn {
-        min
-    } else {
-        (MAX_IR_DROP_MV * 1000 / u32::from(resistance_mohm)).clamp(min, max)
-    };
-    Ok(SmartCurrent {
-        current_ma: (current / 50 * 50) as u16,
-        worn,
-    })
+    mc5000_protocol::charging::smart_current_ma(chemistry.to_bluetooth_chemistry(), resistance_mohm)
 }
 
 /// Why a cell's measured voltage cannot belong to the chosen chemistry.

@@ -59,7 +59,9 @@ cargo run -p charger-controller-cli -- --help
 - `cycle <slot> [options]` - Charge/discharge cycles for capacity testing
 - `refresh <slot> [options]` - Deep cycle restoration (NiMH/NiCd)
 - `break-in <slot> [options]` - Conditioning cycles for new batteries
-- `auto [slot]` - Auto-detect chemistry and start charging
+- `auto [slot]` - Detect chemistry and charge at a fixed 500 mA
+- `smart [slot]` - Detect chemistry, measure internal resistance, charge at a current chosen from it
+- `info` - Charger model, firmware/hardware versions, settings and slots (read only)
 - `monitor` - Continuous slot monitoring
 - `debug` - Debug BLE communication and view raw notifications
 
@@ -140,11 +142,14 @@ charger-cli refresh 3 --chemistry nimh --current 400 --discharge-current 250
 # Break-in new NiMH batteries in slot 1
 charger-cli break-in 1 --chemistry nimh --current 300
 
-# Auto-detect battery chemistry and start charging all slots
+# Detect each cell's chemistry and charge all idle slots at a fixed 500 mA
 charger-cli auto
 
-# Auto-detect and charge slot 2
+# The same for slot 2 only
 charger-cli auto 2
+
+# Measure each cell's internal resistance first, then charge at a current chosen from it
+charger-cli smart
 
 # Stop slot 2
 charger-cli stop 2
@@ -158,17 +163,21 @@ charger-cli monitor
 
 ## Auto-Charge Feature
 
-The auto-charge feature automatically:
-1. Detects battery chemistry from voltage
-2. Starts charging at 100mA initial current
-3. Measures internal resistance
-4. Adjusts current based on: `min(capacity × 0.5C, 300mV/R, 3000mA)`
+Unattended charging comes in two flavours, the same in the CLI and the GUI (rules in
+`mc5000-protocol/src/charging.rs`). Both detect the chemistry from the resting voltage:
+Li-Ion at 3.7 V or more, NiMH below 1.5 V. Other voltages fit several chemistries and are
+skipped (configure those slots manually); Li-Ion HV is never chosen.
+
+- **Auto** charges every detected cell at a fixed **500 mA**.
+- **Smart** first charges briefly at a low probe current (NiMH 200 mA, Li-Ion 300 mA) until
+  the charger reports the internal resistance, then charges at a current chosen from it:
+  about 100 mV across the cell's resistance, at most 400 mA for NiMH, 1000 mA for Li-Ion
+  (2000 mA for large cells below 25 mΩ). NiMH cells above 500 mΩ are charged gently at
+  200 mA and flagged as worn; cells above 1000 mΩ (NiMH) or 300 mΩ (Li-Ion) are stopped.
 
 ```bash
-# CLI
-charger-cli auto
-
-# Or in GUI, click the ⚡ Auto button
+charger-cli auto      # or the GUI's Auto (500mA) button
+charger-cli smart     # or the GUI's SmartCharge button
 ```
 
 ## Documentation

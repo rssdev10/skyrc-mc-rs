@@ -90,6 +90,23 @@ impl BatteryChemistry {
         }
     }
 
+    /// Convert bluetooth chemistry to slot chemistry
+    pub fn from_bluetooth_chemistry(chemistry: mc5000_protocol::BatteryChemistry) -> Self {
+        use mc5000_protocol::BatteryChemistry as B;
+        match chemistry {
+            B::LiIon => BatteryChemistry::LiIon,
+            B::LiIonHV => BatteryChemistry::LiIonHV,
+            B::LiFePO4 => BatteryChemistry::LiFePO4,
+            B::NiMH => BatteryChemistry::NiMH,
+            B::NiCd => BatteryChemistry::NiCd,
+            B::Eneloop => BatteryChemistry::Eneloop,
+            B::NiZn => BatteryChemistry::NiZn,
+            B::RAM => BatteryChemistry::RAM,
+            B::LTO => BatteryChemistry::LTO,
+            B::NaIon => BatteryChemistry::NaIon,
+        }
+    }
+
     pub fn all() -> Vec<BatteryChemistry> {
         vec![
             BatteryChemistry::LiIon,

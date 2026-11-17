@@ -191,9 +191,10 @@ struct SmartProbe {
 }
 
 /// How long Smart waits for a resistance reading before keeping the probe current.
-const SMART_PROBE_TIMEOUT: Duration = Duration::from_secs(25);
+const SMART_PROBE_TIMEOUT: Duration =
+    Duration::from_secs(mc5000_protocol::charging::SMART_PROBE_TIMEOUT_S);
 /// Charger-reported run time before the resistance reading is trusted.
-const SMART_PROBE_SETTLE_S: u32 = 5;
+const SMART_PROBE_SETTLE_S: u32 = mc5000_protocol::charging::SMART_PROBE_SETTLE_S;
 /// A program re-sent to a running slot (Smart switching from its probe to the chosen
 /// current). The charger stops the old program and starts the new one, so it reports the slot
 /// idle in between; that idle is not shown.

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use mc5000_protocol::{
-    BatteryChemistry, ChargeConfig, ConnectMode, MC5000Protocol, MC5000SlotState,
+    charging, BatteryChemistry, ChargeConfig, ConnectMode, MC5000Protocol, MC5000SlotState,
     MC5000SlotStatus, OperationMode, Session, SessionEvent,
 };
 use tokio::runtime::Runtime;
@@ -158,15 +158,22 @@ enum Commands {
         capacity: u16,
     },
     
-    /// Auto-detect battery chemistry and start charging
+    /// Detect each idle cell's chemistry (Li-Ion at 3.7 V or more, NiMH below 1.5 V) and
+    /// charge it at a fixed 500 mA. Other voltages are skipped as ambiguous.
     Auto {
         /// Slot number (1-4), or omit for all slots
         #[arg(value_name = "SLOT")]
         slot: Option<u8>,
-        
-        /// Starting current in mA (will adjust based on resistance)
-        #[arg(short = 'a', long, default_value = "100")]
-        current: u16,
+    },
+
+    /// Detect each idle cell's chemistry, measure its internal resistance with a short
+    /// low-current probe, then charge at a current chosen from it (NiMH at most 400 mA,
+    /// Li-Ion 1000 mA, or 2000 mA for large cells). Worn cells are charged gently; cells
+    /// with too high a resistance are stopped.
+    Smart {
+        /// Slot number (1-4), or omit for all slots
+        #[arg(value_name = "SLOT")]
+        slot: Option<u8>,
     },
     
     /// Debug command to test BLE communication and view notifications
@@ -205,19 +212,6 @@ fn chemistry_name(chem: BatteryChemistry) -> &'static str {
         BatteryChemistry::RAM => "RAM (1.65V)",
         BatteryChemistry::LTO => "LTO (2.85V)",
         BatteryChemistry::NaIon => "Na-Ion (4.0V)",
-    }
-}
-
-fn detect_chemistry_from_voltage(voltage_mv: u32) -> BatteryChemistry {
-    match voltage_mv {
-        v if v >= 4000 => BatteryChemistry::LiIon,
-        v if v >= 3800 => BatteryChemistry::LiIonHV,
-        v if v >= 3300 => BatteryChemistry::LiFePO4,
-        v if v >= 3000 => BatteryChemistry::LiFePO4,
-        v if v >= 2200 => BatteryChemistry::LTO,
-        v if v >= 1700 => BatteryChemistry::NiZn,
-        v if v >= 1300 => BatteryChemistry::NiMH,
-        _ => BatteryChemistry::NiMH,
     }
 }
 
@@ -293,7 +287,8 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("Unknown chemistry: {}", chemistry))?;
             run_break_in(cli.verbose, *slot, chem, *current, *capacity).await
         }
-        Some(Commands::Auto { slot, current }) => run_auto(cli.verbose, *slot, *current).await,
+        Some(Commands::Auto { slot }) => run_auto(cli.verbose, *slot).await,
+        Some(Commands::Smart { slot }) => run_smart(cli.verbose, *slot).await,
         Some(Commands::Debug { duration }) => run_debug(cli.verbose, *duration).await,
     }
 }
@@ -739,59 +734,164 @@ async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-async fn run_auto(verbose: bool, slot: Option<u8>, initial_current: u16) -> Result<(), Box<dyn Error>> {
+/// The idle, non-empty cells in `slots` with their detected chemistry; prints why the
+/// others are skipped. Detection is shared with the GUI (`mc5000_protocol::charging`).
+fn detect_cells(
+    slots: &[u8],
+    statuses: &[Option<MC5000SlotStatus>; 4],
+) -> Vec<(u8, BatteryChemistry, f32)> {
+    let mut cells = Vec::new();
+    for &slot_num in slots {
+        let Some(status) = &statuses[usize::from(slot_num - 1)] else {
+            println!("Slot {slot_num}: no response, skipping");
+            continue;
+        };
+        let voltage = status.voltage_mv as f32 / 1000.0;
+        if status.is_running() {
+            println!("Slot {slot_num}: already running ({}), skipping", mode_name(status));
+            continue;
+        }
+        match charging::detect_chemistry(voltage) {
+            Ok(chemistry) => {
+                println!("Slot {slot_num}: {} at {voltage:.3} V", chemistry_name(chemistry));
+                cells.push((slot_num, chemistry, voltage));
+            }
+            Err(reason) => println!("Slot {slot_num}: skipped: {reason}"),
+        }
+    }
+    cells
+}
+
+async fn run_auto(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
     let slots = selected_slots(slot)?;
     let session = connect(verbose, ConnectMode::Control).await?;
 
-    println!("=== Auto-Charge Mode ===\n");
-
+    println!("=== Auto: detected chemistry, {} mA ===\n", charging::AUTO_CURRENT_MA);
     let statuses = session.read_all_status(STATUS_TIMEOUT).await;
-    let mut configs = Vec::new();
-    for slot_num in slots {
-        let Some(status) = &statuses[usize::from(slot_num - 1)] else {
-            println!("Slot {}: No response, skipping", slot_num);
-            continue;
-        };
-        if status.voltage_mv < 100 {
-            println!("Slot {}: Empty, skipping", slot_num);
-            continue;
-        }
-        if !matches!(status.state, MC5000SlotState::Idle | MC5000SlotState::Empty) {
-            println!("Slot {}: Already active or finished ({:?}), skipping", slot_num, status.state);
-            continue;
-        }
-
-        let chemistry = detect_chemistry_from_voltage(status.voltage_mv as u32);
-        println!(
-            "Slot {}: Detected {} at {:.3}V",
-            slot_num,
-            chemistry_name(chemistry),
-            status.voltage_mv as f32 / 1000.0
-        );
-        configs.push(ChargeConfig::new(
-            slot_num,
-            chemistry,
-            OperationMode::Charge,
-            3000,
-            initial_current,
-        ));
-    }
+    let configs: Vec<ChargeConfig> = detect_cells(&slots, &statuses)
+        .into_iter()
+        .map(|(slot, chemistry, _)| {
+            ChargeConfig::new(slot, chemistry, OperationMode::Charge, 3000, charging::AUTO_CURRENT_MA)
+        })
+        .collect();
 
     if configs.is_empty() {
         println!("\nNothing to start.");
         let _ = session.disconnect().await;
         return Ok(());
     }
-
-    println!("\nStarting charge...");
     session.start_slots(&configs, running_mask(&statuses)).await?;
     println!(
-        "  ✓ Charge started on {} slot(s) with {}mA initial current",
+        "\n✓ Charging {} slot(s) at {} mA. Run 'charger-cli monitor' to watch progress.",
         configs.len(),
-        initial_current
+        charging::AUTO_CURRENT_MA
     );
-    println!("\nNote: Run 'charger-cli monitor' to watch progress");
+    let _ = session.disconnect().await;
+    Ok(())
+}
 
+/// What Smart decided for one probed slot.
+#[derive(Debug, PartialEq)]
+enum SmartOutcome {
+    Charge(charging::SmartCurrent),
+    Refused(charging::SmartRefusal),
+    /// No reading in time: the cell keeps charging at the probe current.
+    NoReading,
+    /// The probe ended before a reading (the charger stopped it, or never started it).
+    Ended,
+}
+
+/// Smart's decision for a probe slot's latest status, or `None` to keep waiting.
+/// `seen_running`: the charger has reported the probe running at least once (it takes a
+/// couple of seconds to start, so an idle report before that means nothing yet).
+fn smart_decision(
+    chemistry: BatteryChemistry,
+    status: &MC5000SlotStatus,
+    seen_running: bool,
+    timed_out: bool,
+) -> Option<SmartOutcome> {
+    if !status.is_running() {
+        return (seen_running || timed_out).then_some(SmartOutcome::Ended);
+    }
+    let measured = status.resistance_milliohm > 0
+        && status.elapsed_seconds >= charging::SMART_PROBE_SETTLE_S;
+    if measured {
+        return Some(match charging::smart_current_ma(chemistry, status.resistance_milliohm) {
+            Ok(current) => SmartOutcome::Charge(current),
+            Err(refusal) => SmartOutcome::Refused(refusal),
+        });
+    }
+    timed_out.then_some(SmartOutcome::NoReading)
+}
+
+async fn run_smart(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>> {
+    let slots = selected_slots(slot)?;
+    let session = connect(verbose, ConnectMode::Control).await?;
+
+    println!("=== Smart: probe, measure resistance, choose the current ===\n");
+    let statuses = session.read_all_status(STATUS_TIMEOUT).await;
+    let cells = detect_cells(&slots, &statuses);
+    if cells.is_empty() {
+        println!("\nNothing to start.");
+        let _ = session.disconnect().await;
+        return Ok(());
+    }
+
+    let probes: Vec<ChargeConfig> = cells
+        .iter()
+        .map(|&(slot, chemistry, _)| {
+            ChargeConfig::new(slot, chemistry, OperationMode::Charge, 3000, charging::probe_current_ma(chemistry))
+        })
+        .collect();
+    session.start_slots(&probes, running_mask(&statuses)).await?;
+    println!("\nProbing {} slot(s) (NiMH 200 mA, Li-Ion 300 mA)...", probes.len());
+
+    let deadline = Instant::now() + Duration::from_secs(charging::SMART_PROBE_TIMEOUT_S);
+    // (slot, chemistry, seen running)
+    let mut pending: Vec<(u8, BatteryChemistry, bool)> =
+        cells.iter().map(|&(s, c, _)| (s, c, false)).collect();
+    while !pending.is_empty() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let timed_out = Instant::now() >= deadline;
+        let mut still_waiting = Vec::new();
+        for (slot_num, chemistry, seen_running) in pending {
+            let Ok(status) = session.read_status(slot_num, STATUS_TIMEOUT).await else {
+                if timed_out {
+                    println!("Slot {slot_num}: no status; left at the probe current");
+                } else {
+                    still_waiting.push((slot_num, chemistry, seen_running));
+                }
+                continue;
+            };
+            let seen_running = seen_running || status.is_running();
+            match smart_decision(chemistry, &status, seen_running, timed_out) {
+                None => still_waiting.push((slot_num, chemistry, seen_running)),
+                Some(SmartOutcome::Charge(choice)) => {
+                    let config = ChargeConfig::new(slot_num, chemistry, OperationMode::Charge, 3000, choice.current_ma);
+                    session.start_slots(&[config], session.active_mask()).await?;
+                    println!(
+                        "Slot {slot_num}: {} mΩ → charging at {} mA{}",
+                        status.resistance_milliohm,
+                        choice.current_ma,
+                        if choice.worn { " (worn cell: charging gently)" } else { "" }
+                    );
+                }
+                Some(SmartOutcome::Refused(reason)) => {
+                    session.stop_slots(1 << (slot_num - 1)).await?;
+                    println!("Slot {slot_num}: stopped: {reason}");
+                }
+                Some(SmartOutcome::NoReading) => {
+                    println!("Slot {slot_num}: resistance not measured; keeps charging at the probe current")
+                }
+                Some(SmartOutcome::Ended) => println!(
+                    "Slot {slot_num}: the charger ended the probe ({}); not charged",
+                    error_name(status.error)
+                ),
+            }
+        }
+        pending = still_waiting;
+    }
+    println!("\nRun 'charger-cli monitor' to watch progress.");
     let _ = session.disconnect().await;
     Ok(())
 }
@@ -1074,6 +1174,37 @@ mod tests {
         ] {
             assert!(report.contains(expected), "missing {expected:?} in:\n{report}");
         }
+    }
+
+    #[test]
+    fn smart_waits_for_a_settled_reading_then_decides() {
+        let probe = |r: u16, elapsed: u32| {
+            let mut s = status(2, 200).unwrap();
+            s.resistance_milliohm = r;
+            s.elapsed_seconds = elapsed;
+            s
+        };
+        let nimh = BatteryChemistry::NiMH;
+        assert_eq!(smart_decision(nimh, &probe(0, 10), true, false), None, "no reading yet");
+        assert_eq!(smart_decision(nimh, &probe(336, 2), true, false), None, "reading not settled");
+        assert_eq!(
+            smart_decision(nimh, &probe(336, 6), true, false),
+            Some(SmartOutcome::Charge(charging::SmartCurrent { current_ma: 250, worn: false }))
+        );
+        assert_eq!(
+            smart_decision(nimh, &probe(646, 6), true, false),
+            Some(SmartOutcome::Charge(charging::SmartCurrent { current_ma: 200, worn: true }))
+        );
+        assert_eq!(
+            smart_decision(nimh, &probe(1200, 6), true, false),
+            Some(SmartOutcome::Refused(charging::SmartRefusal::TooResistive { resistance_mohm: 1200 }))
+        );
+        assert_eq!(smart_decision(nimh, &probe(0, 30), true, true), Some(SmartOutcome::NoReading));
+        let idle = status(2, 0).unwrap();
+        // The charger takes a couple of seconds to start the probe: idle means nothing yet.
+        assert_eq!(smart_decision(nimh, &idle, false, false), None, "not started yet");
+        assert_eq!(smart_decision(nimh, &idle, true, false), Some(SmartOutcome::Ended), "ended");
+        assert_eq!(smart_decision(nimh, &idle, false, true), Some(SmartOutcome::Ended), "never started");
     }
 
     #[test]
