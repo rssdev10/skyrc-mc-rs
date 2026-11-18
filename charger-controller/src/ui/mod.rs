@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use crate::app::{AppMessage, ConnectionStatus};
 use crate::i18n::t;
-use mc5000_protocol::{Device, DeviceManager};
 use crate::slot::{Slot, SlotId, SlotState, TaskConfig};
 use crate::data::DataLogger;
 
@@ -17,8 +16,8 @@ use components::{device_panel, slot_panel, graph_panel, data_panel};
 
 #[allow(clippy::too_many_arguments)]
 pub fn main_view<'a>(
-    device_manager: &'a DeviceManager,
-    connected_device: &'a Option<Device>,
+    device_names: Vec<String>,
+    connected_name: Option<&'a str>,
     slots: &'a [Slot; 4],
     data_logger: &'a DataLogger,
     connection_status: &'a ConnectionStatus,
@@ -32,6 +31,7 @@ pub fn main_view<'a>(
     profile_store: &'a crate::profiles::ProfileStore,
     buttons_locked: bool,
     slot_command_pending: &'a [Option<(Instant, SlotState)>; 4],
+    slot_notices: &'a [Option<String>; 4],
 ) -> Element<'a, AppMessage> {
     // If config dialog is active, show it instead of the main view
     if let Some(state) = config_dialog_state {
@@ -40,15 +40,15 @@ pub fn main_view<'a>(
 
     // Device panel on top (connection controls + status)
     let device_section = device_panel::view(
-        device_manager,
-        connected_device,
+        device_names,
+        connected_name,
         connection_status,
         selected_device,
         scanning,
     );
 
     // Slots section with Auto/Smart/Stop buttons in the header row
-    let slots_section = create_slots_section(slots, slot_configs, configuring_slot, connection_status, selected_slot, buttons_locked, slot_command_pending);
+    let slots_section = create_slots_section(slots, slot_configs, configuring_slot, connection_status, selected_slot, buttons_locked, slot_command_pending, slot_notices);
 
     // Data panel (stats + export) on the left, graph fills the rest
     let data_section = data_panel::view(data_logger, show_detailed_stats);
@@ -74,6 +74,8 @@ pub fn main_view<'a>(
         .into()
 }
 
+// Per-slot UI state is passed through as separate borrowed arrays, as in `main_view`.
+#[allow(clippy::too_many_arguments)]
 fn create_slots_section<'a>(
     slots: &'a [Slot; 4],
     slot_configs: &'a [Option<TaskConfig>; 4],
@@ -82,6 +84,7 @@ fn create_slots_section<'a>(
     selected_slot: Option<usize>,
     buttons_locked: bool,
     slot_command_pending: &'a [Option<(Instant, SlotState)>; 4],
+    slot_notices: &'a [Option<String>; 4],
 ) -> Element<'a, AppMessage> {
     let is_connected = matches!(connection_status, ConnectionStatus::Connected);
     let buttons_enabled = is_connected && !buttons_locked;
@@ -117,7 +120,9 @@ fn create_slots_section<'a>(
     )
     .delay(Duration::from_millis(500));
 
-    let stop_all_button = if is_connected {
+    // Stop stays available while reconnecting: it is queued and sent on reconnect.
+    let can_stop = is_connected || matches!(connection_status, ConnectionStatus::Reconnecting(_));
+    let stop_all_button = if can_stop {
         button(text(t!("btn.stop_all").to_string()).size(14))
             .on_press(AppMessage::StopAllSlots)
             .padding([4, 10])
@@ -153,7 +158,8 @@ fn create_slots_section<'a>(
                 .as_ref()
                 .map(|(t, _)| t.elapsed().as_secs() < 10)
                 .unwrap_or(false);
-            slot_panel::view(slot, config, is_configuring, is_connected, is_selected, idx, cmd_pending)
+            let notice = slot_notices[idx].as_deref();
+            slot_panel::view(slot, config, is_configuring, is_connected, is_selected, idx, cmd_pending, notice)
         })
         .collect();
 

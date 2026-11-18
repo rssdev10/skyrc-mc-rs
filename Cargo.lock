@@ -705,7 +705,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "charger-controller"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "btleplug",
  "chrono",
@@ -731,19 +731,14 @@ dependencies = [
 
 [[package]]
 name = "charger-controller-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
- "btleplug",
  "chrono",
  "clap",
  "ctrlc",
  "env_logger",
- "futures",
- "log",
  "mc5000-protocol",
- "serde",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -2561,12 +2556,11 @@ dependencies = [
 
 [[package]]
 name = "mc5000-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "btleplug",
  "futures",
  "log",
- "serde",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",

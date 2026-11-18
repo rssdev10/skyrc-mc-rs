@@ -18,13 +18,13 @@ The MC5000 is a 4-slot intelligent battery charger supporting multiple battery c
 - LTO (2.85V) - Lithium titanate oxide
 - Na-Ion (4.0V) - Sodium-ion
 
-**Operation Modes:**
-- **Charge** (0x00) - Normal charging to target voltage
-- **Storage** (0x01) - Discharge/charge to storage voltage (Li-Ion long-term storage)
-- **Discharge** (0x02) - Discharge only to cutoff voltage
-- **Cycle** (0x03) - Charge/discharge cycles for capacity testing; supports sub-modes: C→D, C→D→C, D→C
-- **Refresh** (0x04) - Deep cycle restoration for NiMH/NiCd batteries
-- **Break-In** (0x05) - Conditioning cycles for new NiMH/NiCd batteries (gentle C→D→C)
+**Operation Modes** (the mode byte is numbered per chemistry family; see the 0x91 section):
+- **Charge** - Normal charging to target voltage
+- **Storage** - Discharge/charge to storage voltage (lithium family)
+- **Discharge** - Discharge only to cutoff voltage
+- **Cycle** - Charge/discharge cycles for capacity testing; sub-modes C→D, D→C, C→D→C, D→C→D
+- **Refresh** - Deep cycle restoration (NiMH, NiCd, eneloop)
+- **Break-In** - Conditioning cycles for new NiMH/NiCd/eneloop cells
 
 **Configurable Parameters:**
 - Charge/discharge current (mA)
@@ -74,11 +74,21 @@ fn calculate_checksum(data: &[u8]) -> u8 {
 
 Additional frames recovered from the second HCI capture:
 
-- **0x02 - Keep-alive?** Observed as `0f 02 02 02` (very small frame; likely a ping/ack).
-- **0x25 - Large blob (app handshake/session lock?)** Observed once as `0f 2b 25 d8 49 d5 9f ee f3 ad 61 b1 c8 93 58 8c 3d 92 d6 81 b5 01 ff 5e 3f 7c 87 b6 7a 13 b2 d9 73 95 8d 3e 69 da 00 00 00 08 00 00 00` (length byte 0x2b → 43 bytes payload: 41 data + checksum). Contents look like opaque entropy (possibly session/auth seed). **Note**: This may be required to "unlock" the device for control commands. Without it, the device may ACK configs but not apply them.
-- **0xEA - Large config/telemetry blob (unknown)** Observed once as `0f 22 ea d0 f9 3c 63 3d c5 00 a2 73 94 12 00 00 00 20 00 00 00 20 00 00 00 01 00 00 00 00 00 e3 24 28 49 c8` (length byte 0x22 → 34-byte payload). Purpose unknown; keep for future decoding.
+- **0x02, 0x25, 0xEA are not MC5000 commands.** Re-parsing every capture at the GATT level
+  (connection, handle, direction) shows that the bytes once read as `0x25` and `0xEA` frames sit
+  inside 182-byte packets exchanged with a *different* BLE device on another connection (at
+  offsets 144 and 114), and that `0f 02 02 02` never occurs in the charger's traffic. The
+  official app has no such commands either. Do not send them.
 - **0x94 ACK**: After sending a full 0x94 config the device replies `0f 04 94 <channel> 01 <checksum>` (e.g. `0f 04 94 01 01 96`) confirming the configuration for that channel.
-- **0x93 action 0x02**: In addition to start-all (0x03) and stop-all (0x00), a frame `0f 03 93 02 95` was captured, indicating a per-bitmask start/stop action (seen while stopping a single slot).
+- **0x93** reads a slot's stored program in the official app; it does not start or stop anything
+  (see the 0x93 section).
+
+### Sources for field meanings
+
+Field meanings marked **app** come from the code of the official SkyRC Android app (version
+2.94), which builds and parses every MC5000 frame. Each was checked against all captures of that
+app talking to a charger; where the captures cannot confirm a field (for example it is always 0),
+the text says so.
 
 ### 0x06 - Device Greeting (Notification only)
 
@@ -88,8 +98,11 @@ Sent by device immediately upon connection.
 
 **Response**: `0f 04 06 01 01 08`
 - `06` = Command
-- `01 01` = Unknown (possibly protocol version)
+- `01 01` = Meaning unknown; the official app ignores this frame.
 - Checksum: `08`
+
+A similar unsolicited `0f 04 07 00 00 07` appears after the charger restarts (for example after
+a firmware update). The app ignores it too.
 
 ---
 
@@ -97,35 +110,47 @@ Sent by device immediately upon connection.
 
 **Request**: `0f 13 57 00 ff 34 37 38 c1 a4 00 00 00 00 00 00 00 00 00 00 5e`
 - `57` = Command
-- `00` = Subcommand (query)
-- `ff 34 37 38` = BT address suffix reversed (FF34 → ff34, then "78" from MAC)
-- `c1 a4` = Unknown (app identifier?)
-- `00...00` = Padding
+- `00` = Always 0
+- `ff 34 37 38 c1 a4` = the charger's BLE MAC address, least significant byte first
+  (here `A4:C1:38:37:34:FF`) (app). The charger does not check it: requests with a wrong or
+  an all-zero address got the same reply (verified live). The frame must be exactly 21 bytes;
+  an earlier version of this client sent a 22-byte frame, which the charger ignored.
+- `00...00` = Padding to 17 payload bytes
 - `5e` = Checksum
 
-**Response**: `0f 13 57 00 31 30 30 32 31 33 34 04 00 00 00 00 01 52 01 00 80 57`
-- `57` = Command
-- `00` = Status OK
-- `31 30 30 32 31 33 34` = ASCII serial number "1002134"
-- `04` = Unknown
-- `00 00 00 00` = Padding
-- `01 52` = **Firmware Version**: Major=1, Minor=82 → **FW 1.82**
-- `01 00` = **Hardware Version**: Major=1, Minor=0 → **HW 1.00**
-- `80` = Unknown (device capabilities?)
-- `57` = Checksum
+**Response**: `0f 13 57 00 31 30 30 32 31 34 04 00 00 00 00 01 52 01 00 80 57`
+
+The 16 bytes after `57 00` are what the app calls the device code; it sends them as hex to
+SkyRC's update server to look up firmware (app).
+
+| Code byte | Example | Meaning |
+|-----------|---------|---------|
+| 0–5 | `31 30 30 32 31 34` | Model ID, ASCII "100214" = MC5000 (app: `machineSn`; the same for every MC5000, not a serial number) |
+| 6–7 | `04 00` | Part of the code; meaning unknown |
+| 8–9 | `00 00` | OEM code (`0000` = SkyRC) (app) |
+| 10 | `00` | Unused |
+| 11–12 | `01 52` | **Firmware version** major, minor as decimal → 1.82. The official 1.83 image carries `01 53`. |
+| 13 | `01` | **Hardware version**: the app reads the low nibble → HW 1 (the charger menu shows 1.0) |
+| 14 | `00` | Reserve code (app) |
+| 15 | `80` | Check byte: makes the 16 code bytes sum to 0 mod 256 (app recomputes it the same way) |
+
+The frame checksum (`57` here) follows as usual.
 
 ---
 
-### 0x74 - Version / Info Request
+### 0x74 - Password Verification
 
 **Request**: `0f 07 74 00 00 00 00 00 74`
 - `74` = Command
-- `00 00 00 00 00` = Parameters (all zeros)
+- `00` = Always 0
+- `00 00 00 00` = The four password digits, one digit (0–9) per byte. The app uses the stored
+  password, default `0000` (app).
 - `74` = Checksum
 
 **Response**: `0f 04 74 01 01 76`
 - `74` = Command
-- `01 01` = Version/info data (possibly internal protocol version: major=1, minor=1)
+- byte 3 `01` = not read by the app
+- byte 4 `01` = Result: `01` password accepted, anything else rejected (app)
 - `76` = Checksum
 
 ---
@@ -163,86 +188,112 @@ Example from real device:
 | 3 | XX | Channel (0x01/0x02/0x04/0x08 = slot 1/2/3/4) | ✓ |
 | 4-5 | XX XX | **Current (mA, big-endian u16)**: e.g. 0x012A = 298mA, 0x02BD = 701mA. Zero when idle/completed. Previously misinterpreted as separate "status byte" + "current multiplier" — both bytes together form the current. | ✓ |
 | 6-7 | XX XX | **Voltage in mV** (big-endian): e.g., 0x059D = 1437mV | ✓ |
-| 8 | 00 | Unknown (always 0x00 observed) | ? |
-| 9 | 00 | Unknown (always 0x00 observed) | ? |
+| 8-9 | XX XX | **Battery temperature** (big-endian, °C) according to the app. 0 in every capture so far. | app only |
 | 10-11 | XX XX | **Capacity** (big-endian, mAh): Accumulated charge | ✓ |
-| 12 | 00 | Unknown (always 0x00 observed) | ? |
-| 13 | 00 | Unknown (always 0x00 observed) | ? |
-| 14-15 | XX XX | **Elapsed Time** (big-endian, seconds) | ✓ |
+| 12-15 | XX XX XX XX | **Elapsed time** (big-endian u32, seconds). Bytes 12-13 are 0 below 18.2 h, which is why bytes 14-15 alone looked right. (app) | ✓ / app |
 | 16-17 | XX XX | **Resistance** (big-endian, mΩ): Battery internal resistance | ✓ |
-| 18 | XX | **Delta-V** (mV): Voltage drop for NiMH termination | ✓ |
-| 19 | XX | **Chemistry type?**: 0x00=LiIon, 0x02=NiMH (observed, unconfirmed) | ? |
-| 20 | 00 | Unknown (always 0x00 observed) | ? |
-| 21 | XX | **Slot index?**: 0x00/0x03 observed - meaning unclear | ? |
+| 18 | XX | **Phase** of the slot (see below). Previously misread as delta-V. | ✓ live / app |
+| 19 | XX | **Configured mode**, numbered per chemistry family as in the 0x94 config (see below). Kept after a stop. | ✓ live / app |
+| 20 | XX | **Error code**, 0 = none (see below) (app; 9, 10 and 13 seen in captures) | ✓ |
+| 21 | XX | **Configured chemistry**, same codes as the 0x94 config. Kept after a stop. | ✓ live / app |
 | 22 | XX | Checksum (SUM mod 256 of bytes 2-21) | ✓ |
 
-**Status Byte Values (Byte 4) - VALIDATED:**
-| Value | State | Notes |
-|-------|-------|-------|
-| 0x00 | Idle/Charging (NiMH) | For NiMH: if byte5 > 0, actively charging. Check voltage/byte5 to distinguish idle vs active |
-| 0x01 | Charging - CC mode | Constant Current phase (Li-Ion) - VALIDATED on slot 4 |
-| 0x02 | Charging - CV mode | Constant Voltage phase (current tapering) |
-| 0x03 | Charging (generic) | Observed in older captures |
-| 0x04 | Completed | Charging cycle finished successfully |
-| 0x05 | Charging CV/Trickle | Observed for Li-Ion at target voltage (4.2V), trickle/maintenance |
-| 0x06 | Charging (alt) | Alternative charging indicator |
-| 0x07 | Discharging | Active discharge, uses byte5 × 10 ≈ mA for current |
-| 0x09 | Paused | Charging paused by user |
+**Phase, mode, error and chemistry (bytes 18–21)** — from the app's status parser, checked
+against a live charger (Li-Ion and NiMH cells, every mode) and all captures:
 
-**Current Calculation (VALIDATED):**
-- For status 0x00 (NiMH): `current_mA = byte5 × 4`
-  - Example: byte5=0xC6 (198) → 198 × 4 = 792 mA ✓
-- For status 0x01 (Li-Ion CC): `current_mA = byte5 × 4`
-  - Example: byte5=0x2E (46) → 46 × 4 = 184 mA ✓
-- For status 0x07 (Discharging): `current_mA = byte5 × 10`
-  - Uses a different multiplier than charging modes ✓
+| Byte 18 | Phase (app text) | Evidence |
+|---------|------------------|----------|
+| 0x00 | Idle | live, captures |
+| 0x01 | "Wait…" (about to start) | app only |
+| 0x02 | Charging | live, captures; also the charge stage of Cycle, Refresh, Break-in |
+| 0x03 | Discharging | live, captures; also Li-Ion Storage pulling a full cell down |
+| 0x04 | Resting (between cycle stages) | app only |
+| 0x05 | Done | app only |
+| 0x06 | Done | live (NiMH Discharge ended at the cut-off voltage) |
 
-**State Disambiguation (Status 0x00):**
-- If voltage_mv = 0: **Empty** (no battery in slot)
-- If voltage_mv > 0 and byte5 > 0: **Charging** (NiMH/NiCd style, byte5 = current)
-- If voltage_mv > 0 and byte5 = 0 and elapsed_seconds > 0 and cap > 0: **Done** (completed charge)
-- If voltage_mv > 0 and byte5 = 0: **Idle** (battery present, not active)
+The app treats a slot with phase 0 or 1 and a voltage below 5 mV as empty.
+
+Byte 19 (and the 0x94 mode byte) is numbered per chemistry **family** (app; captures):
+
+| Byte 19 | Lithium family: Li-Ion, Li-Ion HV, LiFePO4, LTO, Na-Ion | Nickel family: NiMH, NiCd, eneloop | NiZn, RAM |
+|---------|------|------|------|
+| 0x00 | Charge | Charge | Charge |
+| 0x01 | Storage | Refresh | Discharge |
+| 0x02 | Discharge | Break-in | Cycle |
+| 0x03 | Cycle | Discharge | — |
+| 0x04 | — | Cycle | — |
+
+NiZn and RAM form their own family. Captures of the app confirm it: NiZn and RAM configs with
+mode 1 ran as a discharge (phase 3) and mode 2 as a cycle (phases 2 and 3). Verified live on
+firmware 1.83: a RAM config with mode 1 was reported back as RAM Discharge and discharged at
+the set 100 mA.
+
+| Byte 20 | Error (app text) | Seen in captures |
+|---------|------------------|------------------|
+| 0 | none | ✓ |
+| 1 | Input Volt Too Low! | |
+| 2 | Input Volt Too High! | |
+| 3, 9 | Connection Break! | 9 ✓ |
+| 4 | Capacity Limit! | |
+| 5 | Time Limit! | |
+| 6 | Int. Temp. Too High! | |
+| 7 | Calibration Failed! | |
+| 8 | High Internal Resistance! | |
+| 10 | Battery Type Error! | ✓ (a Li-Ion program sent to slots holding NiMH cells) |
+| 11 | Overload Protection! | |
+| 12 | Reversed Polarity! | |
+| 13 | Fully Charged! | ✓ |
+
+The firmware 1.83 image also contains the texts "Battery Temp. Too High!", "Overcharged!" and
+"Startup Failure!", which the app has no codes for: the charger has a battery temperature sensor
+(so status bytes 8-9 can be non-zero), and some error codes are not in the table above.
+
+Bytes 19–21 describe what was configured and stay set after a stop; byte 18 says whether it is
+running. Bytes 4–5 are always the current magnitude (no sign): use byte 18 for direction.
 
 ---
 
-### 0x93 - Start/Stop Charging
+### 0x93 - Read a Slot's Program (not start/stop)
 
-**Request**: `0f 03 93 <action> <checksum>`
-- `93` = Command
-- `action` =
-    - `0x00` Stop all channels
-    - `0x03` Start all configured channels (begins operation on all slots that have received a 0x94 config)
-    - `0x01/0x02/0x04/0x08` Channel bitmask — starts operation on a specific slot (must have received 0x94 config first)
+**Request**: `0f 03 93 <index> <checksum>`, where `index` is the **0-based** slot number
+(0 = slot 1 … 3 = slot 4), not a bitmask.
 
-**Note**: In capture 3, the sequence to start a single slot after stop-all was:
-1. Send 0x94 config for the slot
-2. Send 0x93 with the slot's bitmask (e.g., 0x01 for slot 1)
+The official app sends it when it opens a slot's program screen, to read back the program
+stored for that slot, and then sends the 0x94 config when the user saves (app). Every capture
+agrees: each `93 <n>` is followed by a 0x94 for slot n+1 (`93 02` → slot 3, `93 03` → slot 4).
+**The MC5000 never answered 0x93 in any capture** (86 requests, no reply).
 
-No per-slot stop command was observed; only `StopAll` (0x00) was used to stop operations.
+Earlier versions of this document called 0x93 "start/stop with a bitmask". That was a
+misreading: in the same captures a slot starts as soon as its 0x94 is acknowledged, before or
+without any later 0x93, and stops on 0xFE. The live findings that were attributed to 0x93 are
+explained by 0x94 and 0xFE:
 
-Examples:
-- Start all: `0f 03 93 03 96`
-- Stop all: `0f 03 93 00 93`
-- Start slot 1 only: `0f 03 93 01 94`
-- Start slot 2 only (observed in capture 2): `0f 03 93 02 95`
+- `FE 02` + `93 00` stopped slot 2 while slot 4 kept running: `FE 02` stops slot 2.
+- `FE 0A` + `93 00` stopped only slot 2: an FE mask with several bits stops only the lowest slot.
+- A start mask such as `93 0A` left a running slot untouched: 0x93 changes nothing.
+
+**Verified live (firmware 1.83):** a lone 0x94 (NiMH Charge, 200 mA, no FE before and no 0x93
+after) was acknowledged with `94 02 01` and the slot was charging at 200 mA two seconds later;
+`93 01` then got no reply and changed nothing; a lone `FE 02` was answered `fe 02 01` and the
+slot was idle at 0 mA within two seconds.
+
+This client still sends `FE <slot>` before each config and a `0x93` after, and `93 00` after
+each FE stop; the extra 0x93 frames are harmless.
 
 ---
 
 ### 0x94 - Charging Configuration
 
-Configures charging parameters for a slot. Sent before 0x93 Start command.
+Configures a slot's program **and starts it**: in every capture the slot leaves idle as soon as
+the charger acknowledges the 0x94 (app: saving the program sends only 0x94, then closes the
+screen).
 
 **Request**: `0f 2a 94 <channel> <mode> <params...> <checksum>`
 
-**Operation Modes (Byte 4 = data[1]):**
-| Value | Mode | Description |
-|-------|------|-------------|
-| 0x00 | Normal Charge | Standard charging (Li-Ion, NiMH, NiCd, LiFePO4, Li-Ion HV) |
-| 0x01 | Storage | Discharge/charge to storage voltage (Li-Ion, LiFePO4, LTO, Na-Ion) |
-| 0x02 | Discharge | Discharge only to cutoff voltage. **Note**: In capture 3, the app sent mode 0x02 for the "Break-In" (NiMH) operation. Either Break-In is implemented as plain Discharge internally, or mode 0x05 is used in different contexts. |
-| 0x03 | Cycle | Charge/discharge cycles (capacity test); cycle direction encoded in data[21] |
-| 0x04 | Refresh | Deep cycle restoration mode (NiMH/NiCd only) |
-| 0x05 | Break-In | Conditioning cycles for new batteries (NiMH/NiCd only); uses C→D→C pattern. Not directly observed in capture 3 (app sent 0x02 instead). |
+**Mode (byte 4 = data[1])** is numbered per chemistry family, exactly as status byte 19 (see the
+0x91 section): lithium family 0 Charge, 1 Storage, 2 Discharge, 3 Cycle; nickel family (NiMH,
+NiCd, eneloop) 0 Charge, 1 Refresh, 2 Break-in, 3 Discharge, 4 Cycle; NiZn and RAM 0 Charge,
+1 Discharge, 2 Cycle (app; every captured config agrees).
 
 **Battery Chemistry Types (data[32]) — confirmed series 5 capture (all 10 chemistries tested):**
 | Value | Chemistry | Target Voltage | Cutoff Voltage | Notes |
@@ -258,7 +309,7 @@ Configures charging parameters for a slot. Sent before 0x93 Start command.
 | 0x08 | LTO | 2850 mV (2.85V) | 1800 mV | Lithium titanate oxide; supports storage mode (confirmed series 5) |
 | 0x09 | Na-Ion | 4000 mV (4.0V) | 2000 mV | Sodium-ion; supports storage mode (confirmed series 5) |
 
-**Packet Structure (44 bytes total, VALIDATED from capture 3 btsnoop):**
+**Packet Structure (44 bytes total, VALIDATED from captures and the app):**
 
 > **Endianness note**: Most multi-byte fields are big-endian. Single-byte fields at data[22] (delta-peak) and data[23] (trickle) replaced previously documented 2-byte LE fields (corrected from capture 4 analysis).
 
@@ -268,14 +319,14 @@ Configures charging parameters for a slot. Sent before 0x93 Start command.
 | 1 | - | 2a | Length (42) | - | ✓ |
 | 2 | - | 94 | Command | - | ✓ |
 | 3 | 0 | XX | Channel bitmask (01/02/04/08); 0x00 = all slots | - | ✓✓ |
-| 4 | 1 | XX | **Mode**: 0x00=Charge, 0x01=Storage, 0x02=Discharge, 0x03=Cycle, 0x04=Refresh, 0x05=Break-In (see note) | - | ✓ |
+| 4 | 1 | XX | **Mode**, numbered per chemistry family (see above) | - | ✓ |
 | 5-6 | 2-3 | XX XX | Charge current (mA) | BE | ✓ |
 | 7-8 | 4-5 | XX XX | Discharge current (mA) | BE | ✓ |
 | 9-10 | 6-7 | XX XX | Capacity (mAh) | BE | ✓ |
 | 11-12 | 8-9 | XX XX | Target/CV voltage (mV); for Storage mode in capture 4 = charge limit (4200mV), NOT storage voltage | BE | ✓ |
 | 13-14 | 10-11 | XX XX | Cutoff/discharge voltage (mV) | BE | ✓ |
 | 15-16 | 12-13 | XX XX | Charge cutoff current (mA): CV termination threshold (typ. 100mA) | BE | ✓ |
-| 17-18 | 14-15 | XX XX | Discharge cutoff current (mA): Stop discharge below this (typ. 100mA) | BE | ✓ |
+| 17-18 | 14-15 | XX XX | Discharge cutoff current (mA): Stop discharge below this (typ. 100mA). When it is 0 the app sends the discharge current here instead. | BE | ✓ |
 | 19-20 | 16-17 | XX XX | **Charge resting time** (minutes): Pause between charge→discharge phases in cycle/refresh modes (confirmed series 5: 10-15 min typical, 0 when not cycling) | BE | ✓✓ |
 | 21-22 | 18-19 | XX XX | **Discharge resting time** (minutes): Pause between discharge→charge phases in cycle/refresh modes (confirmed series 5: 10-11 min typical, 0 when not cycling) | BE | ✓✓ |
 | 23 | 20 | XX | **Cycle count**: Number of charge/discharge cycles (default 1; observed 2 in NiZn series 5) | - | ✓✓ |
@@ -283,13 +334,14 @@ Configures charging parameters for a slot. Sent before 0x93 Start command.
 | 25 | 22 | XX | **Delta-peak voltage** (mV, single byte): NiMH/NiCd termination (typ. 6mV). 0 for lithium. | - | ✓✓ |
 | 26 | 23 | XX | **Trickle charge** (×10 mA, single byte): 0x05=50mA for NiMH. 0 when unused. | - | ✓✓ |
 | 27-28 | 24-25 | XX XX | **Keep/float voltage** (mV): NiMH float voltage e.g. 1300mV=1.3V. 0 when unused. | BE | ✓✓ |
-| 29 | 26 | 3C | Always 0x3C (= 60 decimal, purpose unknown; present in ALL capture 4 configs) | - | ✓ |
+| 29 | 26 | XX | **Battery temperature cut-off** (°C) (app: `tempProtect`, from the program's "battery temperature cut-off"; the app sends 71 when it is unset). 60 in every captured config. | - | ✓ / app |
 | 30-31 | 27-28 | XX XX | **Cutoff timer** (minutes): Safety timeout (e.g. 60, 90, 120 min). 0 = no timer. | BE | ✓✓ |
-| 32-33 | 29-30 | XX XX | **Max time** (minutes): Maximum operation time (typ. 300 min = 5h) | BE | ✓ |
-| 34 | 31 | 00 | Always 0x00 (chemistry prefix) | - | ✓ |
+| 32-33 | 29-30 | XX XX | Fixed 300 (app field `inMaxbostCapacity`, never user-set for the MC5000; meaning unconfirmed). 300 in every captured config. | BE | ✓ |
+| 34 | 31 | 00 | Turbo mode (app); 0 in every captured config | - | ✓ / app |
 | 35 | 32 | XX | **Chemistry byte**: 0x00=Li-Ion, 0x03=NiMH (see table above) | - | ✓✓ |
-| 36-37 | 33-34 | XX XX | **Secondary value**: Lithium-class = storage voltage (mV): 3800=Li-Ion, 3900=LiHV, 3300=LiFePO4, 2400=LTO, 3500=Na-Ion. Nickel/Alk = 110% capacity (mAh): 3000→3300. | BE | ✓✓ |
-| 38-42 | 35-39 | 00... | Padding (always zeros in captures, 5 bytes) | - | ✓ |
+| 36-37 | 33-34 | XX XX | **Storage voltage** (mV) (app): 3800 Li-Ion, 3900 Li-Ion HV, 3300 LiFePO4, 2400 LTO, 3500 Na-Ion. Nickel, NiZn and RAM programs leave it at 3300 (it is not 110 % of capacity: an eneloop config with 2000 mAh also carries 3300). | BE | ✓✓ |
+| 38 | 35 | XX | **eneloop cell type** for eneloop programs, 0 otherwise (app; see below). The captured eneloop config carried 0 with Std AA's defaults. | - | ✓ / app |
+| 39-42 | 36-39 | 00... | Unused, always 0 | - | ✓ |
 | 43 | - | XX | Checksum | - | ✓ |
 
 **IMPORTANT field layout correction (capture 4):** Previous documentation (captures 1-3) described data[22-23] as 2-byte LE delta-peak and data[26-27] as 2-byte LE timer. Capture 4 Config #3 (NiMH charge, slot 1) with trickle=50mA, keep=1300mV, timer=90min conclusively proves the corrected single-byte layout: byte 0x06 at data[22] is delta-peak (6mV), byte 0x05 at data[23] is trickle (50mA ÷ 10), bytes 0x05 0x14 at data[24-25] are keep voltage (1300mV BE), and bytes 0x00 0x5A at data[27-28] are timer (90min BE). Under the old 2-byte LE interpretation, delta-peak would be 0x0506=1286mV which is absurd for NiMH.
@@ -318,7 +370,7 @@ Channel: 0x08 (Slot 4), Mode: 0x01 (Storage), Charge: 3000mA, Discharge: 2000mA,
 ```
 0f 2a 94 08 02 01 2c 02 58 0b b8 06 72 03 84 00 64 00 64 00 0a 00 0a 01 00 06 00 00 00 3c 00 00 01 2c 00 03 0c e4 00 00 00 00 00 XX
 ```
-Channel: 0x08 (Slot 4), **Mode: 0x02** (Discharge — see note on Break-In), Charge: 300mA, Discharge: 600mA, Capacity: 3000mAh, Target: 1650mV, Cutoff: 900mV, CycleDir: 0x00, Chemistry: 0x03 (NiMH), DeltaPeak: 6mV, Secondary: 3300mAh (110% of 3000)
+Channel: 0x08 (Slot 4), **Mode: 0x02** (Break-in in the nickel numbering), Charge: 300mA, Discharge: 600mA, Capacity: 3000mAh, Target: 1650mV, Cutoff: 900mV, CycleDir: 0x00, Chemistry: 0x03 (NiMH), DeltaPeak: 6mV, Storage-voltage field: 3300 (unused)
 
 **Example 5: Li-Ion Cycle D→C (Slot 1, 2A, 5000mAh, 4.2V) — from capture 3:**
 ```
@@ -336,13 +388,13 @@ Channel: 0x02 (Slot 2), Mode: 0x00 (Charge), Charge: 1000mA, Capacity: 5000mAh, 
 ```
 0f 2a 94 01 00 01 2c 03 e8 0b b8 06 72 03 84 00 64 00 64 00 0a 00 0a 01 00 06 05 05 14 3c 00 5a 01 2c 00 03 0c e4 00 00 00 00 00 26
 ```
-Channel: 0x01 (Slot 1), Mode: 0x00 (Charge), Charge: 300mA, Discharge: 1000mA, Capacity: 3000mAh, Target: 1650mV, Cutoff: 900mV, **DeltaPeak: 6mV** (data[22]=0x06), **Trickle: 50mA** (data[23]=0x05, ×10), **KeepV: 1300mV** (data[24-25]=0x0514 BE), Chemistry: 0x03 (NiMH), Timer: 90min (data[27-28]=0x005a BE), Cap2: 3300mAh (110% of 3000)
+Channel: 0x01 (Slot 1), Mode: 0x00 (Charge), Charge: 300mA, Discharge: 1000mA, Capacity: 3000mAh, Target: 1650mV, Cutoff: 900mV, **DeltaPeak: 6mV** (data[22]=0x06), **Trickle: 50mA** (data[23]=0x05, ×10), **KeepV: 1300mV** (data[24-25]=0x0514 BE), Chemistry: 0x03 (NiMH), Timer: 90min (data[27-28]=0x005a BE), Storage-voltage field: 3300 (unused)
 
 **Example 8: Li-Ion Storage with timer (Slot 4, 700/800mA, 5000mAh) — from capture 4:**
 ```
 0f 2a 94 08 01 02 bc 03 20 13 88 10 68 0c 80 00 64 00 5a 00 0a 00 0a 01 00 06 00 00 00 3c 00 78 01 2c 00 00 0e d8 00 00 00 00 00 bd
 ```
-Channel: 0x08 (Slot 4), Mode: 0x01 (Storage), Charge: 700mA, Discharge: 800mA, Capacity: 5000mAh, **Target: 4200mV** (charge limit, NOT storage voltage), Cutoff: 3200mV, DischCutoff: 90mA, Timer: 120min (data[27-28]=0x0078 BE), Chemistry: 0x00 (Li-Ion), **Cap2: 3800mV** (storage voltage for Li-Ion)
+Channel: 0x08 (Slot 4), Mode: 0x01 (Storage), Charge: 700mA, Discharge: 800mA, Capacity: 5000mAh, **Target: 4200mV** (charge limit, NOT storage voltage), Cutoff: 3200mV, DischCutoff: 90mA, Timer: 120min (data[27-28]=0x0078 BE), Chemistry: 0x00 (Li-Ion), **Storage voltage: 3800mV**
 
 **Example 9: All-slots Li-Ion Charge (Channel 0x00, ACK uses 0x10) — from capture 4:**
 ```
@@ -355,53 +407,113 @@ Channel: 0x00 (all slots), Mode: 0x00 (Charge), Charge: 300mA, Capacity: 5000mAh
 ```
 0f 2a 94 08 00 03 e8 03 e8 0b b8 06 72 03 84 00 64 00 64 00 0a 00 0a 01 00 06 00 00 00 3c 00 00 01 2c 00 07 0c e4 00 00 00 00 00 77
 ```
-Channel: 0x08 (Slot 4), Mode: 0x00 (Charge), Chemistry: **0x07 (RAM)**, Target: 1650mV, Cutoff: 900mV, Cap2: 3300mAh
+Channel: 0x08 (Slot 4), Mode: 0x00 (Charge), Chemistry: **0x07 (RAM)**, Target: 1650mV, Cutoff: 900mV, Storage-voltage field: 3300 (unused)
 
 ---
 
-### 0x65 - Settings Query
+### 0x65 - Firmware-Update Flag
 
-**Request**: `0f 04 65 00 00 65`
-- `65` = Command
-- `00 00` = Query parameters (all zeros)
+**Request**: `0f 04 65 00 <flag> <checksum>`
+- `00` = Always 0
+- `flag` = `01` if SkyRC's update server offers newer firmware for this charger, else `00` (app:
+  `checkNewVer`). Captures show `00`; the app sent `01` while 1.83 was available for a 1.82
+  charger.
 
-**Response**: `0f 04 65 01 01 67`
-- `65` = Command
-- `01 01` = Settings data (possibly device mode or global settings flags)
-- `67` = Checksum
+**Response**: `0f 04 65 01 01 67`. The app does not read it.
 
 ---
 
-### 0xFE - Slot Query / Status Check (captures 3+4)
+### 0xFE - Stop
 
-**Request**: `0f 03 fe <channel> <checksum>`
-- `fe` = Command
-- `channel` = Slot bitmask: 0x01=Slot1, 0x02=Slot2, 0x04=Slot3, 0x08=Slot4, 0x00=General query
+**Request**: `0f 03 fe <mask> <checksum>`
+- `mask` = slot bitmask (0x01, 0x02, 0x04, 0x08), or `0x00` for **all slots** (app: `stopCharge`;
+  the app's Stop dialog sends the slot's bit, or 0 when "all" is ticked).
 
-**Response**: `0f 04 fe <channel_resp> 01 <checksum>`
-- `channel_resp` = Slot bitmask echo (or 0x10 for general query)
-- `01` = Status/acknowledgment (always 0x01 observed)
+**Response**: `0f 04 fe <mask> <result> <checksum>`; `mask` is `0x10` for "all". `result` `01` =
+stopped; anything else makes the app show "stop failed".
 
-**Examples from capture 4:**
-- General query: TX `0f 03 fe 00 fe` → RX `0f 04 fe 10 01 0f`
-- Slot 1: TX `0f 03 fe 01 ff` → RX `0f 04 fe 01 01 00`
-- Slot 2: TX `0f 03 fe 02 00` → RX `0f 04 fe 02 01 01`
-- Slot 3: TX `0f 03 fe 04 02` → RX `0f 04 fe 04 01 03`
-- Slot 4: TX `0f 03 fe 08 06` → RX `0f 04 fe 08 01 07`
+Examples (captures):
+- All slots: TX `0f 03 fe 00 fe` → RX `0f 04 fe 10 01 0f`, then every running slot went idle
+- Slot 4: TX `0f 03 fe 08 06` → RX `0f 04 fe 08 01 07`, then slot 4 went idle
 
-**Purpose**: Appears to be a per-slot status/presence query. Sent before and after start/stop operations. The app sends this frequently during state transitions (stop/start), suggesting it's used to verify slot readiness.
+Earlier versions of this document called 0xFE a "slot query". It is the app's only stop command,
+which is why `FE 00` on connect stopped every running program. A mask with several bits stops
+only the lowest slot (live), so stop several slots with one FE each.
 
-### 0x96 - Slot Info Query (NEW - capture 4)
+### 0x96 - Read System Settings / 0x95 - Write System Settings
 
-**Request**: `0f 03 96 <channel> <checksum>`
-- `96` = Command
-- `channel` = Slot bitmask (e.g. 0x04 = Slot 3)
+**Request**: `0f 03 96 04 9a` (the app always sends `04`).
 
-**Response**: `0f 09 96 <slot> <data...> <checksum>`
-- `96` = Command
-- Observed: `0f 09 96 01 00 00 00 01 01 00 99` (7 data bytes)
+**Response**: `0f 09 96 <x> <beep> <notify> <end> <lcd> <warning> <sleep> <checksum>` (app):
 
-Purpose: May query detailed slot configuration or capabilities. Observed once in capture 4 for slot 3.
+| Byte | Meaning |
+|------|---------|
+| 3 | Not read by the app (`01` and `08` seen) |
+| 4 | System beep |
+| 5 | Notification beep |
+| 6 | End-of-program beep |
+| 7 | LCD setting |
+| 8 | Warning setting |
+| 9 | Sleep time |
+
+Captured replies: `0f 09 96 01 00 00 00 01 01 00 99`, `0f 09 96 08 00 01 00 01 01 00 a1` and,
+read live on firmware 1.83, `0f 09 96 00 00 00 00 01 01 00 98`. `charger-cli info` prints these
+values raw: their value ranges are not documented.
+
+0x95 writes the same settings: payload `00 <beep> <notify> <end> <lcd> <warning> <sleep> <mode>`
+padded to 17 bytes; reply byte 4 `01` = accepted (app). This client never sends it.
+
+### Commands this client must not send
+
+From the app; listed so nobody experiments with them by accident:
+
+| Cmd | App use |
+|-----|---------|
+| 0x60, 0x61, 0x62, 0x66 | Firmware update (prepare, data packets, finish with image checksum, boot-loader version). Writes flash. |
+| 0x97 | Reset (`97 04`) |
+| 0x92 | "Turbo" setting |
+| 0x98 | Charge history (curve) download |
+
+### Commands the firmware accepts
+
+The firmware 1.83 image's command dispatcher handles exactly these command bytes (static
+analysis of the official image):
+
+`06 07 55 56 57 5F 60 65 66 74 88 91 94 95 96 97 98 99 FE`
+
+- **0x93 is not among them**, which is why the charger never answers it.
+- 0x61 and 0x62 are not either: after 0x60 the update data is taken by the boot loader, which
+  occupies the flash below the application (the application is linked at 0xC000).
+- Before dispatching, the firmware turns the channel byte into **one** slot index. Hence a
+  multi-bit 0xFE mask stops only the lowest slot, and `91 0F` returns one frame.
+
+Two of the other commands, read-only per the firmware, were tried live on firmware 1.83:
+
+- **0x5F** (`5F <mask> <4 password digits>`): a 12-byte reply per slot. Bytes 8 and 9 are the
+  slot's programmed charge and discharge currents in 100 mA units (`1e 14` = 3000 / 2000 mA);
+  byte 12 is `01` when the password digits match. Example: `0f 0c 5f 01 00 00 05 00 1e 14 00 00 01 98`.
+- **0x55** (`55 <mask>`): a 34-byte reply, mostly left over from the previous reply (the
+  firmware fills only a few fields of a shared buffer). Not useful.
+
+0x56 (password change), 0x88, 0x95 (write settings), 0x97, 0x98 and 0x99 were not tried.
+
+### eneloop cell types (0x94 byte 35)
+
+The official app offers these types for eneloop programs and sends the index in byte 35;
+choosing one also sets its default capacity and currents. The charger's own menu lists the same
+types (its firmware also names Pro AA and Pro AAA, which the app does not offer).
+
+| Byte 35 | Type | App defaults: capacity / charge / discharge |
+|---------|------|---------------------------------------------|
+| 0 | Std AA | 2000 mAh / 1000 mA / 500 mA |
+| 1 | Std AAA | 800 / 400 / 200 |
+| 2 | Pro/XX AA | 2500 / 1250 / 600 |
+| 3 | Pro/XX AAA | 900 / 450 / 200 |
+| 4 | Lite AA | 1000 / 500 / 250 |
+| 5 | Lite AAA | 600 / 300 / 150 |
+| 6 | Plus AA | 2200 / 1100 / 550 |
+| 7 | Std C | 3200 / 1600 / 800 |
+| 8 | Std D | 6000 / 3000 / 1500 |
 
 ---
 
@@ -436,34 +548,55 @@ The checksum is the **SUM (mod 256)** of all bytes from the command byte to the 
 - `0f 15 91 01 00 c6 ... 03 75`: sum(0x91..0x03) = 0x75 ✓
 - `0f 04 94 01 01 96`: sum(0x94 + 0x01 + 0x01) = 0x96 ✓
 
+## Framing Received Data
+
+Frames are delimited by their length byte, not by BLE notifications. With a 20-byte notification
+payload (the BLE default on some platforms), a 23-byte 0x91 status frame arrives in two
+notifications; on macOS it arrives whole. The receiver (`FrameDecoder` in
+`mc5000-protocol/src/session.rs`) reassembles frames, accepts one only when its checksum matches,
+and resynchronizes on the next `0x0F` otherwise. It does not require a particular frame length,
+so a firmware that sends longer status frames still decodes.
+
+## Request Pacing (measured on a live charger)
+
+- The charger never sends 0x91 status on its own: it must be polled.
+- A 0x91 request with mask `0x0F` returns a single frame, so each slot needs its own request.
+- Requests sent too close together are silently dropped. Share of 0x91 requests answered, by
+  gap between requests: 0 ms ≈ 30 %, 10–50 ms ≈ 65–85 %, 100–150 ms ≈ 95–98 %.
+- 0x57 is answered once the request is a well-formed 21-byte frame; on firmware 1.83 the reply
+  was `0f 13 57 00 31 30 30 32 31 34 04 00 00 00 00 01 53 01 00 7f 57`. Other replies:
+  `0f 04 74 01 01 76`, `0f 04 65 01 01 67`, `0f 04 fe 10 01 0f`.
+
+`Session` therefore keeps writes at least 120 ms apart, polls one slot at a time, and re-requests
+slots that did not answer.
+
 ## App Communication Flow
 
-1. Connect to device via BLE
-2. Subscribe to notifications on 0xFFE1 characteristic (write 0x0100 to CCCD handle 0x0012)
-3. Receive greeting notification (0x06)
-4. Send handshake (0x57) → get device info, FW/HW version, serial number
-5. **Send 0x25 session/auth blob?** (observed once in captures 1-2, NOT in capture 3; may be optional)
-6. Send 0x74 version query → get protocol version info
-7. Send 0x65 settings query → get device settings
-8. Send 0xFE query → unknown purpose (observed in capture 3)
-9. Send 0x94 config for each slot to be used
-10. Send 0x93 start (bitmask for slots, e.g. 0x0B = slots 1+2+4)
-11. **Poll channel status (0x91) continuously** for all slots at ~2s intervals
-12. Send 0x93 stop (0x00=all) when done
+What the official app does (app; matches every capture):
 
-**CRITICAL - Init Sequence Required for Control Commands:**
-The init sequence (steps 6-8: 0x74 → 0x65 → 0xFE) MUST be sent after the handshake for the device to accept start/stop commands. Without this sequence, the device acknowledges config packets (0x94) but silently ignores start/stop (0x93). This was confirmed by live testing: stop commands failed until the init sequence was added to the connect flow.
+1. Connect via BLE, enable notifications on FFE1 (CCCD handle 0x0012), request a larger MTU.
+2. The charger may send the 0x06 greeting.
+3. 0x57 device info → model ID, firmware and hardware version.
+4. 0x74 password verification (default `0000`).
+5. 0x65 firmware-update flag (`01` when newer firmware is available).
+6. Poll 0x91 status, one slot per request.
+7. To start a slot: optionally 0x93 to read its stored program, then **0x94** with the program.
+   The slot starts when the 0x94 is acknowledged.
+8. To stop: **0xFE** with the slot's bit, or `FE 00` for all slots.
 
-**CRITICAL - Multi-Slot Start Command:**
-The start command (0x93) sets the COMPLETE active slot set. Sending start(0x01) for slot 1 followed by start(0x02) for slot 2 in separate sessions does NOT result in both slots running — each start replaces the previous one. To start multiple slots:
-1. Send configs for ALL slots first (0x94 for each)
-2. Send a SINGLE start command with all slot bits combined (e.g. 0x0B = slots 1+2+4)
+**`FE 00` stops every running program (verified live):** a NiMH charge on slot 2 kept running
+after `0x74`, `0x65` and `FE 08` (which stops slot 4 only), but stopped at once after `FE 00`.
+This client never sends `FE 00` on connect; it sends only `0x74` and `0x65`, so connecting and
+reconnecting never interrupt a charge (verified through a connect and four automatic
+reconnects with a charge running).
 
-**CRITICAL - Continuous Polling Required:**
-The device appears to require ongoing status polling (0x91) to keep operations active. Operations stop within seconds of BLE disconnection if no polling has been maintained. The official app polls all 4 slots every ~2 seconds throughout the session.
+Start and stop do not need 0x74 or 0x65: with only the 0x57 handshake, `FE <slot>` + 0x94 +
+`93 <mask>` started a slot and `FE <slot>` + `93 00` stopped it. Per the app and the captures,
+the 0x94 and the FE do the work in those sequences.
 
-**Note on Init Sequence Side Effects:**
-When a NEW BLE session connects and sends the init sequence (0x74/0x65/0xFE), it may restart previously configured operations with reset timers and capacity counters. The device retains slot configurations across BLE sessions but the elapsed-time and capacity-accumulated counters reset on re-init.
+**Polling and disconnects:** the charger never pushes status. A program keeps running after the
+BLE link drops (a slot 4 discharge ran on for ~90 s until stopped explicitly), so always stop
+programs explicitly.
 
 ## Voltage Examples (VALIDATED)
 
@@ -476,37 +609,32 @@ When a NEW BLE session connects and sends the init sequence (0x74/0x65/0xFE), it
 
 ---
 
-## Binary Log Correlation (Validation)
+## Capture Validation
 
-Extracted and validated protocol frames from Android BTSnoop HCI logs:
+All Android HCI captures of the official app were parsed down to GATT (connection, handle,
+direction) and the charger's frames reassembled from its notify/write characteristic (handle
+0x0011). 23 153 frames, every one with a valid checksum:
 
-**Source logs:**
-- `logs/bugreport/FS/data/log/bt/btsnoop_hci.log` (271KB) → **197 valid MC5000 frames**
-- `logs/bugreport/FS/data/log/bt/btsnoop_hci.log.last` (428KB) → **319 valid MC5000 frames**
-- `logs/series_3/btsnooz_hci.log` (btsnoop v1, 4398 records) → **340 valid MC5000 GATT frames**
+| Cmd | App → charger | Charger → app | Meaning |
+|-----|---------------|---------------|---------|
+| 0x06 | — | 15 | Greeting after connect (ignored by the app) |
+| 0x07 | — | 1 | Sent after a restart (ignored by the app) |
+| 0x57 | 20 | 10 | Device info |
+| 0x65 | 10 | 10 | Firmware-update flag |
+| 0x74 | 10 | 10 | Password verification |
+| 0x91 | 11 360 | 11 331 | Slot status |
+| 0x93 | 86 | **0** | Read a slot's program (never answered) |
+| 0x94 | 72 | 72 | Program a slot and start it |
+| 0x96 | 2 | 2 | Read system settings |
+| 0xFE | 71 | 71 | Stop |
 
-**Extraction method:** Standard btsnoop v1 parsing → ACL → L2CAP → ATT → identify MC5000 frames by 0x0F start marker + valid command byte + checksum verification.
+No 0x02, 0x25 or 0xEA frame exists on the charger's connection.
 
-**Validated commands from binary logs:**
-| Command | Captures 1-2 | Capture 3 | Purpose | Confirmed |
-|---------|-------------|-----------|---------|-----------|
-| 0x02 | 1 | ~20 | Keep-alive | ✓ |
-| 0x06 | 4 | 1 | Greeting | ✓ |
-| 0x25 | 1 | 0 | Auth/Session (43 bytes) | ✓ |
-| 0x57 | 4 | 2 | Device Info | ✓ |
-| 0x65 | 4 | 2 | Settings | ✓ |
-| 0x74 | 4 | 2 | Version Info | ✓ |
-| 0x91 | 490+ | ~300 | Slot Status Polling | ✓ |
-| 0x93 | 5 | 3 | Start/Stop | ✓ |
-| 0x94 | 8 | 7 | Config (req + ACK) | ✓ |
-| 0xEA | 1 | 0 | Telemetry (unknown) | ✓ |
-| 0xFE | 0 | 2 | Unknown query (NEW) | ✓ |
-
-**Example correlation with `protocol 2.md` textual log:**
+**Example: a capture correlated with the user action recorded at the time:**
 
 *Action:* "Slot 3: Started charge, capacity 5000 mAh, target 4.2 V, charge 3 A"
 
-*Binary frame (offset 0x02B81F):*
+*Frame:*
 ```
 0F 2A 94 04 00 0B B8 07 D0 13 88 10 68 ...
          │  │  ├──┤  ├──┤  ├──┤  ├──┤
@@ -516,61 +644,57 @@ Extracted and validated protocol frames from Android BTSnoop HCI logs:
 ```
 ✓ All values match the textual description.
 
-**Checksum validation:** 516 total frames extracted, 0 checksum failures - confirms SUM (mod 256) algorithm.
 
 ---
 
-## Protocol Capture 3 - Additional Modes (VALIDATED from btsnoop)
-
-**Source**: `logs/series_3/btsnooz_hci.log` (standard btsnoop v1 format)  
-**Extraction**: 4398 HCI records → 1238 ACL packets → 387 ATT operations → **340 MC5000 GATT frames**  
-**Session log**: `logs/series_3/protocol 3.md`
+## Protocol Capture 3 - Additional Modes (VALIDATED from a capture)
 
 This session tests break-in, cycle, and stop-all commands with a mixed-chemistry setup:
 - **Slots 1, 2**: Li-Ion batteries (5000mAh)
 - **Slot 4**: NiMH battery (3000mAh)
 
-### GATT Service Structure (from bluetooth_manager.log cache)
+### GATT Service Structure (from the phone's GATT cache)
 
 | Service | Handle Range | Description |
 |---------|-------------|-------------|
 | `0000ffe0-0000-1000-8000-00805f9b34fb` | 0x000F - 0x0013 | MC5000 data service |
-| `00010203-0405-0607-0809-0a0b0c0d1912` | 0x0014 - 0x0018 | Secondary service (unknown purpose) |
+| `00010203-0405-0607-0809-0a0b0c0d1912` | 0x0014 - 0x0018 | Telink OTA service (the standard UUID of Telink BLE chips, used to update the BLE module itself). The app updates the charger firmware over FFE1 instead. |
 
 | Characteristic | Handle | Properties | Description |
 |----------------|--------|------------|-------------|
 | `0000ffe1-...` | 0x0011 | 0x16 (READ\|WRITE_WITHOUT_RESPONSE\|NOTIFY) | Main data channel |
 | CCCD (FFE1) | 0x0012 | - | Client Characteristic Configuration Descriptor |
-| `00010203-...-1912` char | 0x0016 | 0x06 (READ\|WRITE_WITHOUT_RESPONSE) | Secondary (unknown) |
+| `00010203-...-1912` char | 0x0016 | 0x06 (READ\|WRITE_WITHOUT_RESPONSE) | Telink OTA data |
 
-### Session Timeline (from btsnoop)
+### Session Timeline (from the capture)
 
-1. **Connect & Greeting**: Device sends `0f 04 06 01 01 08` (greeting)
-2. **Device Info**: TX handshake with MAC `FF:34:37:38:C1:A4` → RX serial "100214", FW 1.82, HW 1.0
-3. **Version Query**: TX `0f 07 74 00 00 00 00 00 74` → RX `0f 04 74 01 01 76`
-4. **Settings Query**: TX `0f 04 65 00 00 65` → RX `0f 04 65 01 01 67`
-5. **Unknown 0xFE**: TX `0f 03 fe 00 fe` → RX `0f 04 fe 10 01 0f`
-6. **Start All**: TX `0f 03 93 03 96` (start all configured channels)
-7. **Config Slot 4** (NiMH "Break-In"): Mode 0x02, 300mA charge, 600mA discharge, chemistry 0x03
-8. **Config Slot 1** (Li-Ion Cycle D→C): Mode 0x03, 2000mA, cycle_direction=0x01, chemistry 0x00
-9. **Config Slot 2** (Li-Ion Charge): Mode 0x00, 1000mA, chemistry 0x00
-10. **Polling**: Continuous 0x91 status requests for all 4 slots
-11. **Stop All**: TX `0f 03 93 00 93`
-12. **Start Slot 1**: Re-configure slot 1, then TX `0f 03 93 01 94` (single slot start)
+1. **Connect & Greeting**: Device sends `0f 04 06 01 01 08`
+2. **Device Info**: TX 0x57 with the MAC → RX model "100214", FW 1.82, HW 1
+3. **Password**: TX `0f 07 74 00 00 00 00 00 74` → RX `0f 04 74 01 01 76`
+4. **Firmware-update flag**: TX `0f 04 65 00 00 65` → RX `0f 04 65 01 01 67`
+5. **Slot 4** (NiMH Break-in): `93 03` (read slot 4), then 0x94 mode 0x02, chemistry 0x03 → slot 4 starts charging
+6. **Slot 1** (Li-Ion Cycle D→C): `93 00`, then 0x94 mode 0x03, cycle direction 0x01 → slot 1 starts discharging
+7. **Slot 2** (Li-Ion Charge): `93 01`, then 0x94 mode 0x00 → slot 2 starts charging
+8. **Polling**: 0x91 for each slot
+9. **Stop all**: TX `0f 03 fe 00 fe` → RX `0f 04 fe 10 01 0f`; all three slots go idle
 
 ### Key Findings
 
-**Cycle D→C Confirmed**: When Cycle mode (0x03) is configured with data[21]=0x01, the charger starts with discharge (status 0x07) then transitions to charge. Slot 1 status timeline: Idle → CC → Charging → **Discharging** → Idle.
+**Cycle D→C Confirmed**: Cycle (0x03, lithium family) with data[21]=0x01 starts with a
+discharge, then charges.
 
-**Chemistry Byte Confirmed**: data[32] encodes the battery chemistry (0x00=Li-Ion, 0x03=NiMH). Previous versions inferred chemistry from target voltage.
+**Chemistry Byte Confirmed**: data[32] encodes the battery chemistry (0x00=Li-Ion, 0x03=NiMH).
 
-**Break-In Mode Confirmed as Discharge (0x02)**: The app's "Break-In" operation for NiMH sends mode byte 0x02 (Discharge), NOT 0x05 (Break-In). **Confirmed by live testing**: mode 0x05 causes the device to abort after ~42 seconds with 0mAh and enter a "Done" state. Mode 0x02 with break-in parameters (discharge_current = 2× charge_current, cutoff_timer=60min, max_time=300min) works correctly. "Break-In" is a UI concept implemented as Discharge with specific parameters.
+**Break-in is mode 0x02 for nickel cells.** In the nickel-family numbering 0x02 *is* Break-in
+(see the mode table); an earlier reading of it as "Discharge" used the lithium numbering. Mode
+0x05 does not exist: sent live it made the charger end after ~42 s with 0 mAh.
 
-**BLE Notification Truncation**: Full 0x91 responses are 23 bytes, but BLE notifications may be truncated to 20 bytes (BLE default MTU). Parsers should handle responses shorter than 23 bytes gracefully. Bytes 19-22 (chemistry hint, unknown, slot index, checksum) may be missing in truncated notifications.
+**BLE Notification Truncation**: Full 0x91 responses are 23 bytes, but with a 20-byte
+notification payload they arrive in two parts; the frame decoder reassembles them.
 
 ### Mode Availability per Chemistry
 
-From app UI analysis (`modes.md`):
+From the charger's menu (`docs/MODES.md`):
 
 | Chemistry | Charge | Storage | Discharge | Cycle | Refresh | Break-In |
 |-----------|--------|---------|-----------|-------|---------|----------|

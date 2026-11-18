@@ -59,7 +59,9 @@ cargo run -p charger-controller-cli -- --help
 - `cycle <slot> [options]` - Charge/discharge cycles for capacity testing
 - `refresh <slot> [options]` - Deep cycle restoration (NiMH/NiCd)
 - `break-in <slot> [options]` - Conditioning cycles for new batteries
-- `auto [slot]` - Auto-detect chemistry and start charging
+- `auto [slot]` - Detect chemistry and charge at a fixed 500 mA
+- `smart [slot]` - Detect chemistry, measure internal resistance, charge at a current chosen from it
+- `info` - Charger model, firmware/hardware versions, settings and slots (read only)
 - `monitor` - Continuous slot monitoring
 - `debug` - Debug BLE communication and view raw notifications
 
@@ -113,6 +115,9 @@ cargo run -p charger-controller
 # Scan for devices
 charger-cli scan
 
+# Charger model, firmware/hardware versions, settings and slots (read only)
+charger-cli info
+
 # Get all slot status
 charger-cli status
 
@@ -137,11 +142,14 @@ charger-cli refresh 3 --chemistry nimh --current 400 --discharge-current 250
 # Break-in new NiMH batteries in slot 1
 charger-cli break-in 1 --chemistry nimh --current 300
 
-# Auto-detect battery chemistry and start charging all slots
+# Detect each cell's chemistry and charge all idle slots at a fixed 500 mA
 charger-cli auto
 
-# Auto-detect and charge slot 2
+# The same for slot 2 only
 charger-cli auto 2
+
+# Measure each cell's internal resistance first, then charge at a current chosen from it
+charger-cli smart
 
 # Stop slot 2
 charger-cli stop 2
@@ -155,17 +163,21 @@ charger-cli monitor
 
 ## Auto-Charge Feature
 
-The auto-charge feature automatically:
-1. Detects battery chemistry from voltage
-2. Starts charging at 100mA initial current
-3. Measures internal resistance
-4. Adjusts current based on: `min(capacity × 0.5C, 300mV/R, 3000mA)`
+Unattended charging comes in two flavours, the same in the CLI and the GUI (rules in
+`mc5000-protocol/src/charging.rs`). Both detect the chemistry from the resting voltage:
+Li-Ion at 2.7 V or more, NiMH below 1.5 V. Other voltages fit several chemistries and are
+skipped (configure those slots manually); Li-Ion HV is never chosen.
+
+- **Auto** charges every detected cell at a fixed **500 mA**.
+- **Smart** first charges briefly at a low probe current (NiMH 200 mA, Li-Ion 300 mA) until
+  the charger reports the internal resistance, then charges at a current chosen from it:
+  about 100 mV across the cell's resistance, at most 400 mA for NiMH, 1000 mA for Li-Ion
+  (2000 mA for large cells below 25 mΩ). NiMH cells above 500 mΩ are charged gently at
+  200 mA and flagged as worn; cells above 1000 mΩ (NiMH) or 300 mΩ (Li-Ion) are stopped.
 
 ```bash
-# CLI
-charger-cli auto
-
-# Or in GUI, click the ⚡ Auto button
+charger-cli auto      # or the GUI's Auto (500mA) button
+charger-cli smart     # or the GUI's SmartCharge button
 ```
 
 ## Documentation
@@ -188,38 +200,46 @@ charger-cli auto
 
 | Crate | Path | Responsibility |
 |-------|------|----------------|
-| `mc5000-protocol` | `mc5000-protocol/src/` | BLE transport (`bluetooth.rs`: scan, connect, write, notifications), packet builders, checksum, response parsers, `BatteryChemistry`, `OperationMode`, `ChargeConfig`; device discovery and connection management (`device.rs`). The only crate that knows the wire format. |
-| `charger-controller` | `charger-controller/src/` | iced GUI. `app.rs` is the state machine (`ChargerApp`, `AppMessage`, `update`, `subscription`); `ui/` holds views; `slot.rs`, `data.rs`, `export.rs` hold slot state, sample logging and CSV export; `settings.rs`, `profiles.rs`, `slot_persist.rs` persist user data via `confy`; `i18n.rs` plus `locales/*.json` provide translations. `main.rs` also exposes a few headless subcommands. |
-| `charger-controller-cli` | `charger-controller-cli/src/main.rs` | `charger-cli` binary (clap). One async function per subcommand. |
+| `mc5000-protocol` | `mc5000-protocol/src/` | `session.rs`: `Session`, the one connection every front end uses (connect with retry, paced polling, frame reassembly, start/stop sequences). `transport.rs`: the `Transport` trait a session runs on, with the Bluetooth LE implementation and a placeholder for a future wired (serial) link that fails until that protocol is known; a new link implements `Transport` and calls `Session::open`. `bluetooth.rs`: BLE transport (scan, connect, write, notifications), packet builders, checksum, response parsers, `BatteryChemistry`, `OperationMode`, `ChargeConfig`. The only crate that knows the wire format. |
+| `charger-controller` | `charger-controller/src/` | iced GUI. `app.rs` is the state machine (`ChargerApp`, `AppMessage`, `update`, `subscription`); `ui/` holds views; `slot.rs`, `data.rs`, `export.rs` hold slot state, sample logging and CSV export; `settings.rs`, `profiles.rs`, `slot_persist.rs` persist user data via `confy`; `i18n.rs` plus `locales/*.json` provide translations. `control.rs` is the text control channel used by headless mode (see below). |
+| `charger-controller-cli` | `charger-controller-cli/src/main.rs` | `charger-cli` binary (clap). One async function per subcommand, all through `Session`. |
 
 Rules that follow from this split:
 
 - Wire-format knowledge (command bytes, offsets, scaling, checksums, chemistry and mode bytes) lives
   only in `mc5000-protocol`. The GUI and CLI use its builders and parsers and never hand-assemble
   packets.
+- All charger I/O goes through `mc5000_protocol::Session`: status (`read_status`,
+  `start_polling`, `subscribe`), starting slots (`start_slots`) and stopping them (`stop_slots`).
+  Do not open a second connection path or write to the peripheral directly.
 - Reuse the existing enums and helpers (`BatteryChemistry`, `OperationMode`, `ChargeConfig`
   builders) instead of duplicating logic.
 - Keep the public API of `mc5000-protocol` stable unless a breaking change is intended.
 
 ### Concurrency model
 
-- **Protocol crate**: async (tokio). `MC5000Protocol` is `Clone` and wraps a btleplug
-  `Peripheral`; clones share the same BLE connection. Notifications arrive on a stream that is
-  consumed by a separate task from the one sending commands.
-- **GUI**: iced runs `update()` and `view()` on the UI thread. BLE notifications enter through
-  `ChargerApp::subscription()` as `AppMessage::NotificationReceived`. Long-running or awaiting work
-  should be returned as `Task::perform(...)`. `ChargerApp` also owns a private tokio `Runtime`
-  used with `block_on` for short command sequences; every `block_on` freezes the UI for its
-  duration.
-- **CLI**: a tokio runtime with a spawned notification task that writes into
-  `Arc<Mutex<HashMap<u8, MC5000SlotStatus>>>`, read by the main task; Ctrl-C is signalled through
-  an `AtomicBool`.
+- **`Session`** (protocol crate, tokio) owns the BLE link and two background tasks: a reader that
+  reassembles notifications into checksum-validated frames and broadcasts them, and an optional
+  poller. Every write passes one async lock that keeps writes at least 120 ms apart (the charger
+  drops requests sent closer together and never pushes status on its own); multi-step command
+  sequences hold the lock throughout, so polling never interleaves with a start/stop sequence.
+  `Session` is `Clone`; clones share the connection. Every write times out after 1 s; two
+  timeouts in a row, or 10 s without a reply while polling, mark the link lost (reported once
+  as `SessionEvent::Disconnected`), after which writes fail at once. Front ends then connect a
+  new session: the GUI reconnects automatically, as does `charger-cli monitor`.
+- **GUI**: iced runs `update()` and `view()` on the UI thread and never waits for the charger.
+  Connect and every command run as `Task::perform` futures and report back as
+  `AppMessage::Connected` / `AppMessage::CommandFinished`. Decoded statuses arrive through
+  `ChargerApp::subscription()` as `AppMessage::StatusReceived`. The 1 s `Tick` only refreshes
+  time-based UI; it sends nothing to the charger.
+- **CLI**: one tokio runtime; each command connects a `Session`, uses it and disconnects. `monitor`
+  runs the session's poller; Ctrl-C is signalled through an `AtomicBool`.
 
 ### Documentation map
 
 - `docs/PROTOCOL.md` – authoritative BLE protocol reference. Update it together with any change to
   packet encoding or decoding.
-- `modes.md` – operation modes and their parameters per chemistry.
+- `docs/MODES.md` – default settings per chemistry and mode, recorded from the charger's own menu.
 - `docs/GUI_DESIGN.md` – GUI architecture, messages and layout. Update it whenever the GUI changes.
 - `packaging/README.md` – release packaging layout.
 - When README or docs show CLI usage, the argument names must match `charger-controller-cli`
@@ -237,8 +257,34 @@ cargo clippy --workspace --all-targets -- -D warnings         # lint (must be wa
   tests are in `charger-controller/src/app.rs`.
 - Tests must not need a Bluetooth adapter or a charger: CI runs on a headless Linux runner. Build
   packets and feed recorded or synthetic byte arrays to the parsers instead.
-- Hardware checks are manual: run the CLI (`charger-cli status`, `charger-cli monitor`,
-  `charger-cli debug`) or the GUI against a real MC5000.
+- Hardware checks run against a real MC5000: the CLI (`charger-cli status`, `charger-cli monitor`,
+  `charger-cli debug`) or the GUI in headless mode (below).
+
+### Headless mode: driving the GUI from scripts and agents
+
+`charger-controller -H` runs the real GUI app with an invisible window and reads commands from
+stdin; `--control` does the same with the window visible. Each command produces the same
+`AppMessage`s a user's clicks do (for example `start` opens the Configure dialog, fills it in and
+presses Confirm), so the GUI's own state machine, tasks and BLE session are what get tested.
+Feedback is one JSON object per line on stdout: `state` snapshots, `event`s (`connected`,
+`connect_failed`, `connection_lost`, `command_finished`, `scanned`, `quit_waiting`,
+`stop_not_delivered`), `ack`s and `error`s. A failed `wait-until` makes the process exit with
+status 1. Slot states follow the charger's own status, so waits confirm what the charger did:
+`wait-until slot <n> running` after a start, `wait-until slot <n> idle` (or `all idle`) after a
+stop, and `wait-until settled` once every start and stop has been confirmed. `quit` waits for
+commands still on their way to the charger. The `start`, `stop` and `auto` subcommands use these
+waits instead of fixed delays.
+
+```bash
+charger-controller -H status          # connect, print one state snapshot, quit
+charger-controller -H monitor -i 2    # state snapshot every 2 s
+printf 'wait-until scanned 20\nconnect\nwait-until connected 70\nwait-until readings\nstate\nquit\n' \
+  | charger-controller -H
+```
+
+The subcommands (`scan`, `status`, `monitor`, `start`, `stop`, `auto`) are ready-made scripts in
+the same command language. Type `help` in a session for the full list
+(`charger-controller/src/control.rs`).
 
 ### Diagnostics
 

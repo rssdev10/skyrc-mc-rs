@@ -35,28 +35,17 @@ pub struct ConfigDialogState {
     pub selected_profile: Option<usize>,
     pub config_modified: bool, // Track if config was changed since profile was applied
     pub deleted_profile: Option<crate::profiles::Profile>, // For undo support
+    /// Why Confirm was refused (shown above the buttons); cleared on the next change.
+    pub error: Option<String>,
     /// Name of the last applied profile (persisted across sessions, resolved to index on open)
     pub last_profile_name: Option<String>,
 }
 
 impl ConfigDialogState {
     /// Detect battery chemistry based on current voltage
+    /// Chemistry the dialog proposes for a cell at `voltage_v` (see `auto_charge`).
     pub fn detect_chemistry_from_voltage(voltage_v: f32) -> BatteryChemistry {
-        // Use voltage ranges to suggest chemistry type
-        if voltage_v >= 4.0 {
-            BatteryChemistry::LiIon  // 4.2V nominal
-        } else if voltage_v >= 3.8 {
-            BatteryChemistry::LiIonHV  // 4.35V nominal
-        } else if voltage_v >= 3.3 {
-            BatteryChemistry::LiFePO4  // 3.65V nominal
-        } else if voltage_v >= 2.2 {
-            BatteryChemistry::LTO  // 2.8V nominal
-        } else if voltage_v >= 1.7 {
-            BatteryChemistry::NiZn  // 1.85V nominal
-        } else {
-            // Below 1.7V: NiMH/NiCd (nominal 1.2V, discharged can be 0.8-1.3V)
-            BatteryChemistry::NiMH
-        }
+        crate::auto_charge::suggest_chemistry(voltage_v)
     }
 
     pub fn new(voltage_v: f32) -> Self {
@@ -86,6 +75,7 @@ impl ConfigDialogState {
             selected_profile: None,
             config_modified: false,
             deleted_profile: None,
+            error: None,
             last_profile_name: None,
         }
     }
@@ -117,6 +107,7 @@ impl ConfigDialogState {
             selected_profile: None,
             config_modified: false,
             deleted_profile: None,
+            error: None,
             last_profile_name: p.last_profile_name.clone(),
         }
     }
@@ -133,6 +124,7 @@ impl ConfigDialogState {
 
     pub fn update_chemistry(&mut self, new_chemistry: BatteryChemistry) {
         self.chemistry = new_chemistry;
+        self.error = None;
         self.config = ChargeConfig::default_for_chemistry_and_mode(new_chemistry, self.mode);
         
         // Update all input fields with new defaults
@@ -152,8 +144,33 @@ impl ConfigDialogState {
         self.cycle_count_input = self.config.cycle_count.to_string();
     }
 
+    /// Selects an eneloop cell type and fills in its capacity and currents (the official
+    /// app's defaults for the type). A current the mode does not use stays 0.
+    pub fn update_eneloop_type(&mut self, eneloop: mc5000_protocol::EneloopType) {
+        self.error = None;
+        self.config.eneloop_type = eneloop as u8;
+        let (capacity, charge, discharge) = eneloop.defaults();
+        self.config.capacity_mah = capacity;
+        if self.config.charge_current_ma > 0 {
+            self.config.charge_current_ma = charge;
+        }
+        if self.config.discharge_current_ma > 0 {
+            self.config.discharge_current_ma = discharge;
+        }
+        self.capacity_input = self.config.capacity_mah.to_string();
+        self.charge_current_input = self.config.charge_current_ma.to_string();
+        self.discharge_current_input = self.config.discharge_current_ma.to_string();
+    }
+
+    /// The selected eneloop cell type.
+    pub fn eneloop_type(&self) -> mc5000_protocol::EneloopType {
+        mc5000_protocol::EneloopType::from_byte(self.config.eneloop_type).unwrap_or_default()
+    }
+
     pub fn update_mode(&mut self, new_mode: ChargeMode) {
+        let eneloop = self.eneloop_type();
         self.mode = new_mode;
+        self.error = None;
         self.config = ChargeConfig::default_for_chemistry_and_mode(self.chemistry, new_mode);
         
         // Update all input fields
@@ -171,6 +188,10 @@ impl ConfigDialogState {
         self.charge_resting_input = self.config.charge_resting_min.to_string();
         self.discharge_resting_input = self.config.discharge_resting_min.to_string();
         self.cycle_count_input = self.config.cycle_count.to_string();
+        // A chosen eneloop type carries over to the new mode.
+        if self.chemistry == BatteryChemistry::Eneloop && eneloop != mc5000_protocol::EneloopType::default() {
+            self.update_eneloop_type(eneloop);
+        }
     }
 
     pub fn reset_to_defaults(&mut self) {
@@ -290,12 +311,29 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
         row![text(format!("{}:", t!("config.battery_type"))).width(Length::Fixed(180.0)), chemistry_picker]
             .spacing(10)
             .align_y(iced::Center),
-        row![text(format!("{}:", t!("config.mode"))).width(Length::Fixed(180.0)), mode_picker]
-            .spacing(10)
-            .align_y(iced::Center),
     ]
     .spacing(12)
     .width(Length::FillPortion(3));
+
+    // eneloop cell type: sets the capacity and currents, and is sent to the charger.
+    if state.chemistry == BatteryChemistry::Eneloop {
+        let eneloop_picker = pick_list(
+            &mc5000_protocol::EneloopType::ALL[..],
+            Some(state.eneloop_type()),
+            AppMessage::ConfigEneloopTypeChanged,
+        )
+        .width(Length::Fixed(200.0));
+        left_col = left_col.push(
+            row![text(format!("{}:", t!("config.eneloop_type"))).width(Length::Fixed(180.0)), eneloop_picker]
+                .spacing(10)
+                .align_y(iced::Center),
+        );
+    }
+    left_col = left_col.push(
+        row![text(format!("{}:", t!("config.mode"))).width(Length::Fixed(180.0)), mode_picker]
+            .spacing(10)
+            .align_y(iced::Center),
+    );
 
     // Capacity
     left_col = left_col.push(
@@ -480,7 +518,11 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
     };
 
     left_col = left_col.push(
-        row![
+        column![
+            state.error.as_ref().map(|error| {
+                text(error.clone()).size(13).color(iced::Color::from_rgb(0.85, 0.2, 0.2))
+            }),
+            row![
             button(text(t!("btn.cancel").to_string()))
                 .on_press(AppMessage::ConfigDialogCancel)
                 .padding(10),
@@ -493,8 +535,10 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
                 .on_press(AppMessage::ConfigDialogConfirm)
                 .padding(10)
                 .style(button::primary),
+            ]
+            .spacing(10),
         ]
-        .spacing(10)
+        .spacing(6)
         .padding(iced::Padding { top: 15.0, right: 0.0, bottom: 0.0, left: 0.0 })
     );
 

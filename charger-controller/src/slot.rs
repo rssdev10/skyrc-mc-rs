@@ -13,7 +13,9 @@ pub struct Slot {
     pub current_current: f32,
     pub capacity_mah: u32,
     pub resistance_milliohm: u16,
-    pub elapsed_seconds: u16,
+    pub elapsed_seconds: u32,
+    /// Battery temperature the charger reports (°C); 0 = no reading.
+    pub temperature_c: u16,
     pub start_time: Option<Instant>,
     pub last_update: Option<Instant>,
 }
@@ -88,6 +90,23 @@ impl BatteryChemistry {
         }
     }
 
+    /// Convert bluetooth chemistry to slot chemistry
+    pub fn from_bluetooth_chemistry(chemistry: mc5000_protocol::BatteryChemistry) -> Self {
+        use mc5000_protocol::BatteryChemistry as B;
+        match chemistry {
+            B::LiIon => BatteryChemistry::LiIon,
+            B::LiIonHV => BatteryChemistry::LiIonHV,
+            B::LiFePO4 => BatteryChemistry::LiFePO4,
+            B::NiMH => BatteryChemistry::NiMH,
+            B::NiCd => BatteryChemistry::NiCd,
+            B::Eneloop => BatteryChemistry::Eneloop,
+            B::NiZn => BatteryChemistry::NiZn,
+            B::RAM => BatteryChemistry::RAM,
+            B::LTO => BatteryChemistry::LTO,
+            B::NaIon => BatteryChemistry::NaIon,
+        }
+    }
+
     pub fn all() -> Vec<BatteryChemistry> {
         vec![
             BatteryChemistry::LiIon,
@@ -155,18 +174,16 @@ impl Slot {
             capacity_mah: 0,
             resistance_milliohm: 0,
             elapsed_seconds: 0,
+            temperature_c: 0,
             start_time: None,
             last_update: None,
         }
     }
 
+    /// Records the task sent to the charger. The state changes only when the charger's
+    /// status reports the slot running.
     pub fn start_task(&mut self, config: TaskConfig) {
         self.current_task = Some(config.clone());
-        self.state = match config.task_type {
-            TaskType::Charge => SlotState::Charging,
-            TaskType::Discharge => SlotState::Discharging,
-            _ => SlotState::Charging, // Default to charging for other types
-        };
         self.start_time = Some(Instant::now());
         self.last_update = Some(Instant::now());
         
@@ -180,6 +197,13 @@ impl Slot {
         self.last_update = None;
         
         log::info!("Stopped task on slot {}", self.id.0);
+    }
+
+    /// Drops the GUI's record of the task after a stop was sent, but keeps the state: the
+    /// slot shows idle only when the charger reports it.
+    pub fn forget_task(&mut self) {
+        self.current_task = None;
+        self.start_time = None;
     }
 
     #[allow(dead_code)]
@@ -209,13 +233,10 @@ impl Slot {
         self.current_current = current;
         self.last_update = Some(Instant::now());
 
-        // Check for completion conditions
-        if let Some(task) = self.current_task.clone() {
-            self.check_completion_conditions(&task);
-        }
+        // Completion is decided by the charger: its status reports the slot as finished.
     }
     
-    pub fn update_full_status(&mut self, voltage: f32, current: f32, capacity: u32, resistance: u16, elapsed: u16) {
+    pub fn update_full_status(&mut self, voltage: f32, current: f32, capacity: u32, resistance: u16, elapsed: u32) {
         self.current_voltage = voltage;
         self.current_current = current;
         self.capacity_mah = capacity;
@@ -223,10 +244,7 @@ impl Slot {
         self.elapsed_seconds = elapsed;
         self.last_update = Some(Instant::now());
 
-        // Check for completion conditions
-        if let Some(task) = self.current_task.clone() {
-            self.check_completion_conditions(&task);
-        }
+        // Completion is decided by the charger: its status reports the slot as finished.
     }
     
     pub fn power_w(&self) -> f32 {
@@ -243,10 +261,6 @@ impl Slot {
 
     pub fn is_idle(&self) -> bool {
         self.state == SlotState::Idle
-    }
-
-    pub fn get_elapsed_time(&self) -> Option<Duration> {
-        self.start_time.map(|start| start.elapsed())
     }
 
     pub fn get_progress_percentage(&self) -> f32 {
@@ -305,67 +319,7 @@ impl Slot {
     }
     
     pub fn estimate_chemistry_from_voltage(&self) -> BatteryChemistry {
-        // Estimate battery chemistry based on current voltage
-        let v = self.current_voltage;
-        if v >= 4.0 {
-            BatteryChemistry::LiIon
-        } else if v >= 3.8 {
-            BatteryChemistry::LiIonHV
-        } else if v >= 3.3 {
-            BatteryChemistry::LiFePO4
-        } else if v >= 2.2 {
-            BatteryChemistry::LTO
-        } else if v >= 1.7 {
-            BatteryChemistry::NiZn
-        } else {
-            // Below 1.7V: NiMH/NiCd (nominal 1.2V, discharged can be 0.8-1.3V)
-            BatteryChemistry::NiMH
-        }
-    }
-
-    fn check_completion_conditions(&mut self, task: &TaskConfig) {
-        let mut completed = false;
-        let mut error_msg = None;
-
-        // Check voltage limits
-        if let Some(cutoff_voltage) = task.cutoff_voltage {
-            match task.task_type {
-                TaskType::Charge => {
-                    if self.current_voltage >= cutoff_voltage {
-                        completed = true;
-                    }
-                }
-                TaskType::Discharge if self.current_voltage <= cutoff_voltage => {
-                    completed = true;
-                }
-                _ => {}
-            }
-        }
-
-        // Check time limit
-        if let Some(time_limit) = task.time_limit {
-            if let Some(elapsed) = self.get_elapsed_time() {
-                if elapsed >= time_limit {
-                    completed = true;
-                }
-            }
-        }
-
-        // Check temperature limit
-        if let Some(temp_limit) = task.temperature_limit {
-            // In a real implementation, you'd get temperature from device
-            let current_temp = 25.0; // Mock temperature
-            if current_temp > temp_limit {
-                error_msg = Some(format!("Temperature limit exceeded: {:.1}°C", current_temp));
-            }
-        }
-
-        if let Some(msg) = error_msg {
-            self.state = SlotState::Error(msg);
-        } else if completed {
-            self.state = SlotState::Completed;
-            log::info!("Task completed on slot {}", self.id.0);
-        }
+        crate::auto_charge::suggest_chemistry(self.current_voltage)
     }
 }
 

@@ -14,7 +14,7 @@ env:
 jobs:
   package-protocol:
     name: package mc5000-protocol
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v6
@@ -63,7 +63,7 @@ jobs:
         platform:
           - label: linux
             arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             cli_archive: charger-cli-linux-x86_64.zip
             ui_archive: charger-controller-ui-linux-x86_64.zip

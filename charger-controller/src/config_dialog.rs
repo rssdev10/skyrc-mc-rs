@@ -76,6 +76,11 @@ pub struct ChargeConfig {
     // Cycle mode
     pub cycle_mode: Option<String>,
     pub cycle_count: u16,
+
+    /// eneloop cell type (index of `mc5000_protocol::EneloopType`); ignored for other
+    /// chemistries. Defaults to 0 (Std AA) for configs saved before it existed.
+    #[serde(default)]
+    pub eneloop_type: u8,
 }
 
 impl ChargeConfig {
@@ -116,6 +121,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Storage => Self {
                 capacity_mah: 5000,
@@ -134,6 +140,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 5000,
@@ -152,6 +159,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 5000,
@@ -170,6 +178,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_li_ion(ChargeMode::Charge),
         }
@@ -214,6 +223,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Refresh => Self {
                 capacity_mah: 3000,
@@ -232,6 +242,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::BreakIn => Self {
                 capacity_mah: 3000,
@@ -250,6 +261,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D>C".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 3000,
@@ -268,6 +280,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 3000,
@@ -286,6 +299,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D>C".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_nimh(ChargeMode::Charge),
         }
@@ -343,6 +357,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 3000,
@@ -361,6 +376,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 3000,
@@ -379,6 +395,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_nizn(ChargeMode::Charge),
         }
@@ -403,6 +420,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Storage => Self {
                 capacity_mah: 3000,
@@ -421,6 +439,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 3000,
@@ -439,6 +458,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 3000,
@@ -457,6 +477,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_lto(ChargeMode::Charge),
         }
@@ -481,6 +502,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 3000,
@@ -499,6 +521,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 3000,
@@ -517,6 +540,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_ram(ChargeMode::Charge),
         }
@@ -542,6 +566,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             // Fall back to NiMH defaults for other modes
             _ => {
@@ -571,6 +596,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Storage => Self {
                 capacity_mah: 5000,
@@ -589,6 +615,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Discharge => Self {
                 capacity_mah: 5000,
@@ -607,6 +634,7 @@ impl ChargeConfig {
                 discharge_resting_min: 0,
                 cycle_mode: None,
                 cycle_count: 0,
+                eneloop_type: 0,
             },
             ChargeMode::Cycle => Self {
                 capacity_mah: 5000,
@@ -625,6 +653,7 @@ impl ChargeConfig {
                 discharge_resting_min: 10,
                 cycle_mode: Some("C>D".to_string()),
                 cycle_count: 1,
+                eneloop_type: 0,
             },
             _ => Self::default_naion(ChargeMode::Charge),
         }

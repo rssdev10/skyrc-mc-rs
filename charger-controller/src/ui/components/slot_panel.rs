@@ -8,16 +8,22 @@ use crate::app::AppMessage;
 use crate::i18n::t;
 use crate::slot::{Slot, SlotState, TaskConfig, TaskType, BatteryChemistry};
 
-pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize, cmd_pending: bool) -> Element<'a, AppMessage> {
+// Per-slot UI state is passed through as separate values, as in `ui::main_view`.
+#[allow(clippy::too_many_arguments)]
+pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: bool, is_connected: bool, is_selected: bool, slot_index: usize, cmd_pending: bool, notice: Option<&'a str>) -> Element<'a, AppMessage> {
     if is_configuring {
         return config_dialog_view(slot, config);
     }
 
+    // Battery temperature, shown only when the charger reports one.
+    let temperature = if slot.temperature_c > 0 { format!("{}°C", slot.temperature_c) } else { String::new() };
     let slot_header = row![
         text(format!("{} {}", t!("label.slot"), slot.id.0 + 1)).size(16),
         iced::widget::space::horizontal(),
+        text(temperature).size(12),
         status_badge(&slot.state),
     ]
+    .spacing(6)
     .align_y(iced::Center);
 
     let measurements = column![
@@ -60,7 +66,7 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
             .align_x(iced::Center),
             column![
                 text(t!("label.time").to_string()).size(12),
-                text(format!("{:02}:{:02}", slot.elapsed_seconds / 60, slot.elapsed_seconds % 60)).size(14),
+                text(format_elapsed(slot.elapsed_seconds)).size(14),
             ]
             .width(Length::FillPortion(1))
             .align_x(iced::Center),
@@ -140,14 +146,20 @@ pub fn view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>, is_configuring: 
     };
 
     // Fixed-height content column
+    // Why Auto/Smart skipped or limited this cell, or why a command failed.
+    let notice_line = notice.map(|message| {
+        text(message.to_string()).size(11).color(iced::Color::from_rgb(0.95, 0.6, 0.1))
+    });
+
     let content = column![
         slot_header,
+        notice_line,
         measurements,
         bottom_row,
     ]
     .spacing(8)
     .padding(10)
-    .height(Length::Fixed(220.0));
+    .height(Length::Fixed(240.0));
 
     // Determine slot color for selection border
     let slot_color = match slot_index {
@@ -301,4 +313,23 @@ fn config_dialog_view<'a>(slot: &'a Slot, config: Option<&'a TaskConfig>) -> Ele
         .style(container::bordered_box)
         .width(Length::Fill)
         .into()
+}
+
+/// `mm:ss`, or `h:mm:ss` once a program runs an hour or more.
+fn format_elapsed(seconds: u32) -> String {
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn elapsed_time_shows_hours_past_the_old_16_bit_limit() {
+        assert_eq!(super::format_elapsed(125), "02:05");
+        assert_eq!(super::format_elapsed(70_000), "19:26:40");
+    }
 }
