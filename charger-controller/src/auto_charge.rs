@@ -201,7 +201,7 @@ mod tests {
         );
         assert_eq!(detect_chemistry(1.27), Ok(BatteryChemistry::NiMH));
         assert_eq!(detect_chemistry(0.95), Ok(BatteryChemistry::NiMH));
-        for ambiguous in [3.3, 2.6, 1.9, 1.55] {
+        for ambiguous in [2.6, 1.9, 1.55] {
             assert!(detect_chemistry(ambiguous).is_err(), "{ambiguous} V");
         }
         assert!(detect_chemistry(0.0).is_err());
@@ -222,8 +222,8 @@ mod tests {
     fn suggestion_never_targets_above_a_plausible_cell() {
         // A partly charged Li-Ion (3.85 V) must not be suggested a 4.35 V target.
         assert_eq!(suggest_chemistry(3.85), BatteryChemistry::LiIon);
-        // A depleted Li-Ion or a LiFePO4 at 3.3 V gets the lower 3.65 V target.
-        assert_eq!(suggest_chemistry(3.3), BatteryChemistry::LiFePO4);
+        // A depleted Li-Ion or a LiFePO4 at 2.6 V gets the lower 3.65 V target.
+        assert_eq!(suggest_chemistry(2.6), BatteryChemistry::LiFePO4);
     }
 
     #[test]

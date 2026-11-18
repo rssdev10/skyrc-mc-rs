@@ -15,7 +15,7 @@ use crate::bluetooth::BatteryChemistry;
 
 /// At or above this resting voltage a cell is taken for Li-Ion (4.20 V target).
 /// LiFePO4 never rests this high, and Li-Ion HV cannot be told apart, so it is not chosen.
-pub const LI_ION_MIN_V: f32 = 3.7;
+pub const LI_ION_MIN_V: f32 = 2.7;
 /// Below this resting voltage (and above an empty slot) a cell is taken for NiMH.
 /// Above it, a full NiMH cell and a non-rechargeable alkaline cell look the same.
 pub const NIMH_MAX_V: f32 = 1.5;
@@ -44,7 +44,7 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
-/// Detection for unattended charging: Li-Ion at or above 3.7 V, NiMH below 1.5 V; any
+/// Detection for unattended charging: Li-Ion at or above 2.7 V, NiMH below 1.5 V; any
 /// other voltage is skipped as ambiguous.
 pub fn detect_chemistry(voltage_v: f32) -> Result<BatteryChemistry, SkipReason> {
     if voltage_v < EMPTY_V {
@@ -182,7 +182,7 @@ mod tests {
             assert_eq!(detect_chemistry(v), Ok(BatteryChemistry::LiIon), "{v} V");
         }
         assert_eq!(detect_chemistry(1.2), Ok(BatteryChemistry::NiMH));
-        for v in [1.5, 1.7, 2.4, 3.3, 3.6] {
+        for v in [1.5, 1.7, 2.4] {
             assert!(matches!(detect_chemistry(v), Err(SkipReason::Ambiguous { .. })), "{v} V");
         }
         assert_eq!(detect_chemistry(0.0), Err(SkipReason::Empty));

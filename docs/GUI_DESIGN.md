@@ -75,7 +75,7 @@ the affected slots to `Error`.
   (ambiguous voltage, worn cell, refused cell, no resistance reading) or why a command failed.
   It stays until something new starts on the slot or the cell is removed, so a status update
   cannot hide it. Headless snapshots carry it as `notice`.
-  Detection only commits where voltage is unambiguous (≥ 3.7 V Li-Ion, < 1.5 V NiMH) and never
+  Detection only commits where voltage is unambiguous (≥ 2.7 V Li-Ion, < 1.5 V NiMH) and never
   picks Li-Ion HV; other cells are skipped. Rules and thresholds: `src/auto_charge.rs`.
 - When the charger reports an error code for a slot (status byte 20, e.g. "battery type error",
   "fully charged"), the slot's notice becomes "Charger reports: …". A new code replaces the

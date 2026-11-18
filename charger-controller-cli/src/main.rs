@@ -158,7 +158,7 @@ enum Commands {
         capacity: u16,
     },
     
-    /// Detect each idle cell's chemistry (Li-Ion at 3.7 V or more, NiMH below 1.5 V) and
+    /// Detect each idle cell's chemistry (Li-Ion at 2.7 V or more, NiMH below 1.5 V) and
     /// charge it at a fixed 500 mA. Other voltages are skipped as ambiguous.
     Auto {
         /// Slot number (1-4), or omit for all slots

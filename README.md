@@ -165,7 +165,7 @@ charger-cli monitor
 
 Unattended charging comes in two flavours, the same in the CLI and the GUI (rules in
 `mc5000-protocol/src/charging.rs`). Both detect the chemistry from the resting voltage:
-Li-Ion at 3.7 V or more, NiMH below 1.5 V. Other voltages fit several chemistries and are
+Li-Ion at 2.7 V or more, NiMH below 1.5 V. Other voltages fit several chemistries and are
 skipped (configure those slots manually); Li-Ion HV is never chosen.
 
 - **Auto** charges every detected cell at a fixed **500 mA**.
