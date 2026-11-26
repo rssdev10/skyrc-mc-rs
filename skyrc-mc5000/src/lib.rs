@@ -19,9 +19,9 @@ pub mod session;
 pub mod transport;
 
 pub use bluetooth::{
-    BluetoothError, DiscoveredBluetoothDevice, MC5000Protocol,
+    Error, DiscoveredCharger, Protocol,
     BatteryChemistry, ChargeConfig, EneloopType, OperationMode,
-    HistoryPage, MC5000DeviceInfo, MC5000SlotStatus, MC5000SlotState, MC5000SystemSettings,
+    HistoryPage, DeviceInfo, SlotStatus, SlotState, SystemSettings,
     StartStopAction, VoltageHistory,
 };
 pub use session::{ConnectMode, Frame, FrameDecoder, Session, SessionEvent};

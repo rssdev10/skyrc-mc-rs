@@ -8,7 +8,7 @@
 //! - [`SerialTransport`]: placeholder for a wired (USB serial) link, to be implemented once
 //!   that protocol is known. Opening one fails; it never fakes a connection.
 
-use crate::bluetooth::{BluetoothError, DiscoveredBluetoothDevice, MC5000Protocol};
+use crate::bluetooth::{Error, DiscoveredCharger, Protocol};
 use crate::session::ConnectMode;
 use btleplug::api::Peripheral as _;
 use btleplug::platform::Peripheral;
@@ -22,18 +22,18 @@ pub type IncomingBytes = BoxStream<'static, Vec<u8>>;
 /// A connected link to a charger.
 pub trait Transport: Send + Sync + 'static {
     /// Writes one packet. Pacing is the session's job, not the transport's.
-    fn write<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<(), BluetoothError>>;
+    fn write<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<(), Error>>;
 
     /// Whether the link is still up.
     fn is_connected(&self) -> BoxFuture<'_, bool>;
 
     /// Closes the link.
-    fn disconnect(&self) -> BoxFuture<'_, Result<(), BluetoothError>>;
+    fn disconnect(&self) -> BoxFuture<'_, Result<(), Error>>;
 }
 
 /// Bluetooth LE link, through btleplug.
 pub struct BleTransport {
-    protocol: MC5000Protocol,
+    protocol: Protocol,
     peripheral: Peripheral,
 }
 
@@ -42,10 +42,10 @@ impl BleTransport {
     /// the init sequence) and subscribes to notifications. One attempt, no timeout:
     /// [`Session::connect`](crate::Session::connect) adds both.
     pub async fn connect(
-        device: &DiscoveredBluetoothDevice,
+        device: &DiscoveredCharger,
         mode: ConnectMode,
-    ) -> Result<(Self, IncomingBytes), BluetoothError> {
-        let mut protocol = MC5000Protocol::new();
+    ) -> Result<(Self, IncomingBytes), Error> {
+        let mut protocol = Protocol::new();
         let peripheral = device.peripheral.clone();
         match mode {
             ConnectMode::Control => protocol.connect(&peripheral).await?,
@@ -64,7 +64,7 @@ impl BleTransport {
 }
 
 impl Transport for BleTransport {
-    fn write<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<(), BluetoothError>> {
+    fn write<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(self.protocol.send_command(packet))
     }
 
@@ -72,7 +72,7 @@ impl Transport for BleTransport {
         Box::pin(self.protocol.is_connected())
     }
 
-    fn disconnect(&self) -> BoxFuture<'_, Result<(), BluetoothError>> {
+    fn disconnect(&self) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move { Ok(self.peripheral.disconnect().await?) })
     }
 }
@@ -90,15 +90,15 @@ pub struct SerialTransport {
 
 impl SerialTransport {
     /// Always fails until the wired protocol is implemented.
-    pub async fn open(port: &str) -> Result<(Self, IncomingBytes), BluetoothError> {
+    pub async fn open(port: &str) -> Result<(Self, IncomingBytes), Error> {
         Err(Self {
             port: port.to_string(),
         }
         .not_supported())
     }
 
-    fn not_supported(&self) -> BluetoothError {
-        BluetoothError::CommunicationError(format!(
+    fn not_supported(&self) -> Error {
+        Error::CommunicationError(format!(
             "Serial connection on {} is not supported yet: the MC5000 wired protocol is unknown",
             self.port
         ))
@@ -106,7 +106,7 @@ impl SerialTransport {
 }
 
 impl Transport for SerialTransport {
-    fn write<'a>(&'a self, _packet: &'a [u8]) -> BoxFuture<'a, Result<(), BluetoothError>> {
+    fn write<'a>(&'a self, _packet: &'a [u8]) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move { Err(self.not_supported()) })
     }
 
@@ -114,7 +114,7 @@ impl Transport for SerialTransport {
         Box::pin(async { false })
     }
 
-    fn disconnect(&self) -> BoxFuture<'_, Result<(), BluetoothError>> {
+    fn disconnect(&self) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async { Ok(()) })
     }
 }

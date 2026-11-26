@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 use std::hash::{Hash, Hasher};
 
 use skyrc_mc5000::{
-    MC5000SlotState as BtSlotState, ChargeConfig, OperationMode,
-    BluetoothError, ConnectMode, DiscoveredBluetoothDevice,
-    MC5000SlotStatus, Session, SessionEvent, VoltageHistory,
+    SlotState as BtSlotState, ChargeConfig, OperationMode,
+    Error as ChargerError, ConnectMode, DiscoveredCharger,
+    SlotStatus, Session, SessionEvent, VoltageHistory,
 };
 use chrono::{DateTime, Utc};
 
@@ -28,13 +28,13 @@ pub enum AppMessage {
     /// flight, above all stops, have reached the charger.
     QuitRequested,
     /// A decoded slot status from the shared session.
-    StatusReceived(MC5000SlotStatus),
+    StatusReceived(SlotStatus),
     DeviceSelected(String),
-    BluetoothScanComplete(Result<Vec<DiscoveredBluetoothDevice>, String>),
+    BluetoothScanComplete(Result<Vec<DiscoveredCharger>, String>),
     /// Result of a quick targeted scan for a previously known device.
     /// `Ok(Some(device))` → found, ready to connect.
     /// `Ok(None)` → not found, fall back to full scan.
-    QuickScanResult(Result<Option<DiscoveredBluetoothDevice>, String>),
+    QuickScanResult(Result<Option<DiscoveredCharger>, String>),
     ConnectDevice,
     /// Result of a background connect.
     Connected(Result<Session, String>),
@@ -151,7 +151,7 @@ pub enum SlotMessage {
 
 pub struct ChargerApp {
     /// Chargers found by the last scan.
-    devices: Vec<DiscoveredBluetoothDevice>,
+    devices: Vec<DiscoveredCharger>,
     /// The shared connection, while connected.
     session: Option<Session>,
     slots: [Slot; 4],
@@ -170,7 +170,7 @@ pub struct ChargerApp {
     saved_slot_configs: [Option<crate::ui::components::config_dialog::ConfigDialogState>; 4],  // Persist config per slot
     slot_config_store: crate::slot_persist::SlotConfigStore,  // Disk-persisted per-slot configs
     /// The charger last connected, for automatic reconnects.
-    last_device: Option<DiscoveredBluetoothDevice>,
+    last_device: Option<DiscoveredCharger>,
     /// Slots whose stop could not be delivered; sent first after (re)connecting.
     pending_stop: u8,
     /// Start and stop command sequences sent to the session whose result has not arrived.
@@ -322,7 +322,7 @@ fn session_stream(
 
 /// Label shown in the device list and stored as the last device.
 /// Format: `MC5000 BT: <name> (ID:<peripheral id>)`.
-fn device_label(device: &DiscoveredBluetoothDevice) -> String {
+fn device_label(device: &DiscoveredCharger) -> String {
     format!("MC5000 BT: {} (ID:{})", device.name, device.id)
 }
 
@@ -454,7 +454,7 @@ impl ChargerApp {
                 }
                 Task::perform(
                     async move {
-                        skyrc_mc5000::MC5000Protocol::scan_for_device(&pid, 5)
+                        skyrc_mc5000::Protocol::scan_for_device(&pid, 5)
                             .await
                             .map_err(|e| e.to_string())
                     },
@@ -556,7 +556,7 @@ impl ChargerApp {
     /// One Smart step for a slot with a running probe: when the charger has measured the
     /// internal resistance, restart the charge at the current chosen for it, or stop the
     /// slot if the cell should not be charged.
-    fn smart_step(&mut self, idx: usize, status: &MC5000SlotStatus) -> Task<AppMessage> {
+    fn smart_step(&mut self, idx: usize, status: &SlotStatus) -> Task<AppMessage> {
         use crate::auto_charge::{charge_plan, smart_current_ma};
         let Some(probe) = self.smart_probes[idx] else {
             return Task::none();
@@ -690,7 +690,7 @@ impl ChargerApp {
     fn run_command<F, Fut>(&mut self, slots: u8, command: F) -> Task<AppMessage>
     where
         F: FnOnce(Session) -> Fut,
-        Fut: std::future::Future<Output = Result<(), BluetoothError>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), ChargerError>> + Send + 'static,
     {
         match &self.session {
             Some(session) => {
@@ -768,7 +768,7 @@ impl ChargerApp {
     /// Notes when the slot's program started and, once per connection and program, asks
     /// the charger for its voltage history if the app's own data of the program has a hole:
     /// the app connected after the start, or the link was down. Read only.
-    fn history_task(&mut self, slot: usize, status: &MC5000SlotStatus) -> Task<AppMessage> {
+    fn history_task(&mut self, slot: usize, status: &SlotStatus) -> Task<AppMessage> {
         let now = Utc::now();
         if status.is_running() {
             let estimate = now - chrono::Duration::seconds(i64::from(status.elapsed_seconds));
@@ -2378,8 +2378,8 @@ mod tests {
         assert!(app.config_dialog_state.is_none());
     }
 
-    fn status(slot_id: u8, voltage_mv: u16, current_ma: u16) -> MC5000SlotStatus {
-        MC5000SlotStatus {
+    fn status(slot_id: u8, voltage_mv: u16, current_ma: u16) -> SlotStatus {
+        SlotStatus {
             slot_id,
             state: if current_ma > 0 { BtSlotState::Charging } else { BtSlotState::Idle },
             voltage_mv,
@@ -2463,7 +2463,7 @@ mod tests {
         assert_eq!(app.reported_modes[3].as_deref(), Some("Li-Ion Discharge"));
     }
 
-    fn probe_status(slot_id: u8, resistance_milliohm: u16) -> MC5000SlotStatus {
+    fn probe_status(slot_id: u8, resistance_milliohm: u16) -> SlotStatus {
         let mut s = status(slot_id, 1300, 200);
         s.resistance_milliohm = resistance_milliohm;
         s.elapsed_seconds = 8;
@@ -2538,13 +2538,13 @@ mod tests {
     struct NullTransport;
 
     impl skyrc_mc5000::Transport for NullTransport {
-        fn write<'a>(&'a self, _: &'a [u8]) -> futures::future::BoxFuture<'a, Result<(), BluetoothError>> {
+        fn write<'a>(&'a self, _: &'a [u8]) -> futures::future::BoxFuture<'a, Result<(), ChargerError>> {
             Box::pin(async { Ok(()) })
         }
         fn is_connected(&self) -> futures::future::BoxFuture<'_, bool> {
             Box::pin(async { true })
         }
-        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), BluetoothError>> {
+        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), ChargerError>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -2685,13 +2685,13 @@ mod tests {
         fn write<'a>(
             &'a self,
             _packet: &'a [u8],
-        ) -> futures::future::BoxFuture<'a, Result<(), skyrc_mc5000::BluetoothError>> {
+        ) -> futures::future::BoxFuture<'a, Result<(), skyrc_mc5000::Error>> {
             Box::pin(async { Ok(()) })
         }
         fn is_connected(&self) -> futures::future::BoxFuture<'_, bool> {
             Box::pin(async { true })
         }
-        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), skyrc_mc5000::BluetoothError>> {
+        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), skyrc_mc5000::Error>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -2887,8 +2887,8 @@ mod tests {
         assert!(super::has_hole(&[], start, end));
     }
 
-    fn running(slot_id: u8, elapsed_seconds: u32) -> MC5000SlotStatus {
-        MC5000SlotStatus { elapsed_seconds, ..status(slot_id, 4198, 500) }
+    fn running(slot_id: u8, elapsed_seconds: u32) -> SlotStatus {
+        SlotStatus { elapsed_seconds, ..status(slot_id, 4198, 500) }
     }
 
     #[tokio::test]
