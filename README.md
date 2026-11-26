@@ -35,7 +35,9 @@ cargo run -p charger-controller
 ```
 
 **Features:**
-- Real-time slot monitoring with graphs
+- Real-time slot monitoring with a time-axis voltage/current graph (Roll/Infinite views). When
+  the app connects to a program already running, or the link drops, it fills the gap from the
+  charger's own voltage history (see [GUI_DESIGN.md](docs/GUI_DESIGN.md), "Graph")
 - Visual configuration dialog
 - Auto-charge mode with battery detection
 - Data export to CSV
@@ -267,7 +269,7 @@ stdin; `--control` does the same with the window visible. Each command produces 
 `AppMessage`s a user's clicks do (for example `start` opens the Configure dialog, fills it in and
 presses Confirm), so the GUI's own state machine, tasks and BLE session are what get tested.
 Feedback is one JSON object per line on stdout: `state` snapshots, `event`s (`connected`,
-`connect_failed`, `connection_lost`, `command_finished`, `scanned`, `quit_waiting`,
+`connect_failed`, `connection_lost`, `command_finished`, `scanned`, `history`, `quit_waiting`,
 `stop_not_delivered`), `ack`s and `error`s. A failed `wait-until` makes the process exit with
 status 1. Slot states follow the charger's own status, so waits confirm what the charger did:
 `wait-until slot <n> running` after a start, `wait-until slot <n> idle` (or `all idle`) after a

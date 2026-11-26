@@ -113,6 +113,8 @@ pub struct SlotSnapshot {
     pub error: Option<String>,
     /// Message shown on the slot (why Auto/Smart skipped or limited the cell, a failure).
     pub notice: Option<String>,
+    /// Samples the last read of the charger's voltage history added to the graph.
+    pub history_samples: usize,
 }
 
 /// Prints one JSON line: `{"type": kind, ...fields}`.

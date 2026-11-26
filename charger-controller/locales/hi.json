@@ -122,5 +122,16 @@
   "charger_error.reversed": "उलटी ध्रुवता",
   "charger_error.full": "पूरी तरह चार्ज",
   "charger_error.unknown": "त्रुटि %{code}",
-  "config.eneloop_type": "eneloop प्रकार"
+  "config.eneloop_type": "eneloop प्रकार",
+  "btn.set": "लागू करें",
+  "graph.mode_roll": "⟳ रोल",
+  "graph.mode_infinite": "∞ पूरा",
+  "graph.window_s": "विंडो (s)",
+  "graph.clear": "ग्राफ़ साफ़ करें",
+  "graph.recorded": "रिकॉर्ड: %{span}",
+  "graph.select_slot": "ग्राफ़ देखने के लिए स्लॉट चुनें",
+  "graph.no_data": "इस स्लॉट का अभी कोई डेटा नहीं",
+  "graph.legend_voltage": "स्लॉट %{slot} वोल्टेज (V)",
+  "graph.legend_current": "स्लॉट %{slot} करंट (mA)",
+  "graph.legend_history": "चार्जर की मेमोरी से (केवल वोल्टेज)"
 }

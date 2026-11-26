@@ -56,13 +56,14 @@ the affected slots to `Error`.
 │ │Progress│ │Progress│ │Progress│ │Progress│           │
 │ └────────┘ └────────┘ └────────┘ └────────┘           │
 ├──────────────────────────────────────────────────────────┤
-│ Graph Panel (fills remaining space)                      │
+│ Data panel │ Graph of the selected slot (fills the rest) │
+│ (stats,    │                                              │
+│  export)   │ [∞ Infinite] [Clear graph]  Recorded: 14m52s │
 └──────────────────────────────────────────────────────────┘
 ```
 
 - Slot panels with battery inserted (voltage > 0) are rendered with a lighter background.
 - The ⚙ Settings button opens a full-page settings view (theme, BT persistence, about).
-- Graph voltage scale auto-adjusts to the selected slot's data range only.
 - Auto and SmartCharge buttons are disabled for 5 seconds after clicking (cooldown).
 - **Auto** detects each idle cell's chemistry from its resting voltage and starts charging right
   away at a fixed 500 mA (the Configure dialog's other defaults for that chemistry). **SmartCharge** detects the chemistry, runs a
@@ -105,6 +106,39 @@ the affected slots to `Error`.
   event.
 - After Configure & Start completes, the started slot is auto-selected in the graph.
 
+### Graph
+
+Shows the selected slot's voltage (thin line, left axis, V) and current (bold line, right axis,
+mA). Source: `src/ui/components/graph_panel.rs`; it works like the EL15 controller's chart.
+
+- **The x axis is time.** Points are placed by timestamp, never by sample index.
+- **Roll / Infinite** (toolbar toggle, saved in the settings): Roll shows the last N seconds
+  (window field + Set, at least 10 s, default 600 s), labelled relative to now (`-2m05s` … `0`);
+  a partly filled window draws on the right. Infinite shows everything recorded, labelled with
+  wall-clock times, and holds still when no data arrives. Toggling never adds or removes data.
+- **Clear graph** (red, like the other destructive buttons) hides what is recorded so far from the graph in both modes. It deletes
+  nothing: CSV exports still contain it. The data panel's Clear Record Data deletes the data
+  and resets this.
+- The unit is written on the line of each scale's top value, in its trace's color: **V** left
+  of the voltage value, **mA** right of the current value.
+- **Scaling:** both axes fit the visible samples (5 % padding; at least 0.1 V and 100 mA tall,
+  so a flat trace is not stretched). The current axis starts at 0.
+- **Decimation:** at most two points (minimum and maximum) per pixel column, so the whole span
+  is always drawn and a one-sample spike survives. A pause of more than 5 s in live data breaks
+  the line; a lone reading between gaps is drawn as a dot.
+- **Charger history:** when the app's own data of a program has a hole longer than 15 s (it
+  connected after the start, or the link was down), it reads the charger's voltage history
+  (0x98, read only) once per connection and program, and fills the hole with it. Those samples
+  are drawn **dashed** and listed in the legend as "from the charger's memory"; they have no
+  current (the charger sends none), so the current line has a gap there. They are coarser than
+  live data (the charger keeps under 300 samples per program) and stay at least 10 s away from
+  live samples. A finished program is filled only if the app saw it run, since its start time
+  is otherwise unknown. Headless snapshots report the samples added as `history_samples`, and a
+  `{"event": "history"}` line is emitted.
+- The data model behind it (`src/data.rs`): one time-ordered sample list per slot. Each sample
+  records its source (`live` or `charger_history`); the all-samples CSV has a `source` column,
+  and an unknown current is exported as an empty cell.
+
 ### Config Dialog (modal overlay)
 
 Appears when configuring a slot. Fields:
@@ -122,7 +156,7 @@ Appears when configuring a slot. Fields:
 | `src/ui/mod.rs` | Top-level view composition, header bar |
 | `src/ui/components/device_panel.rs` | Bluetooth device list + connect button + settings gear |
 | `src/ui/components/slot_panel.rs` | Per-slot status display + controls (highlights battery presence) |
-| `src/ui/components/graph_panel.rs` | Canvas-based voltage/current graph |
+| `src/ui/components/graph_panel.rs` | Time-axis voltage/current graph: Roll/Infinite, Clear, decimation |
 | `src/ui/components/data_panel.rs` | Data statistics + export buttons |
 | `src/ui/components/config_dialog.rs` | Battery configuration dialog |
 | `src/ui/components/settings_dialog.rs` | Settings page (theme, BT persistence, about/repo info) |

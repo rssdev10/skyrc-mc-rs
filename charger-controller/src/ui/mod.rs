@@ -32,6 +32,7 @@ pub fn main_view<'a>(
     buttons_locked: bool,
     slot_command_pending: &'a [Option<(Instant, SlotState)>; 4],
     slot_notices: &'a [Option<String>; 4],
+    graph_options: graph_panel::GraphOptions<'a>,
 ) -> Element<'a, AppMessage> {
     // If config dialog is active, show it instead of the main view
     if let Some(state) = config_dialog_state {
@@ -52,7 +53,7 @@ pub fn main_view<'a>(
 
     // Data panel (stats + export) on the left, graph fills the rest
     let data_section = data_panel::view(data_logger, show_detailed_stats);
-    let graph_section = graph_panel::view(data_logger, slots, selected_slot);
+    let graph_section = graph_panel::view(data_logger, selected_slot, graph_options);
 
     let bottom_section = row![
         container(data_section).width(Length::Fixed(280.0)).height(Length::Fill),

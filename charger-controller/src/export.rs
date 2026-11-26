@@ -4,7 +4,7 @@ use std::path::Path;
 use std::io::Write;
 use thiserror::Error;
 
-use crate::data::{MeasurementPoint, TimeAlignedRow};
+use crate::data::{MeasurementPoint, SampleSource, TimeAlignedRow};
 
 #[derive(Debug, Error)]
 pub enum ExportError {
@@ -84,7 +84,7 @@ impl TimeAlignedCsvFormat {
         // Add data for each of the 4 slots (current_mA, voltage_V, state, mode, resistance_mOhm, elapsed_time_sec)
         for slot in &row.slots {
             if let Some(data) = slot {
-                record.push(format!("{:.1}", data.current)); // current in mA
+                record.push(fmt_current(data.current));
                 record.push(format!("{:.3}", data.voltage));
                 record.push(data.state.clone());
                 record.push(data.mode.clone());
@@ -119,7 +119,8 @@ impl ExportFormat for CsvFormat {
                 "state",
                 "mode",
                 "resistance_mOhm",
-                "elapsed_time_sec"
+                "elapsed_time_sec",
+                "source"
             ])?;
             csv_writer.flush()?;
         }
@@ -131,12 +132,17 @@ impl ExportFormat for CsvFormat {
         csv_writer.write_record(&[
             measurement.timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             (measurement.slot_id.0 + 1).to_string(),  // 1-based slot numbering
-            format!("{:.1}", measurement.current),  // current in mA
+            fmt_current(measurement.current),
             format!("{:.3}", measurement.voltage),
             measurement.state.clone(),
             measurement.mode.clone(),
             measurement.resistance_milliohm.to_string(),
             measurement.elapsed_seconds.to_string(),
+            match measurement.source {
+                SampleSource::Live => "live",
+                SampleSource::ChargerHistory => "charger_history",
+            }
+            .to_string(),
         ])?;
         csv_writer.flush()?;
         Ok(())
@@ -145,6 +151,11 @@ impl ExportFormat for CsvFormat {
     fn finalize<W: Write>(&self, _writer: &mut W) -> Result<(), ExportError> {
         Ok(())
     }
+}
+
+/// Current in mA, or empty when unknown (samples from the charger's history).
+fn fmt_current(current: Option<f32>) -> String {
+    current.map(|c| format!("{c:.1}")).unwrap_or_default()
 }
 
 /// Generic data exporter that can use different formats
@@ -157,14 +168,14 @@ impl<F: ExportFormat> DataExporter<F> {
         Self { format }
     }
 
-    pub fn export_to_file<P: AsRef<Path>>(
+    pub fn export_to_file<'m, P: AsRef<Path>, I: IntoIterator<Item = &'m MeasurementPoint>>(
         &self,
         path: P,
-        measurements: &[MeasurementPoint],
+        measurements: I,
     ) -> Result<(), ExportError> {
         // Filter out Empty slots
         let filtered_measurements: Vec<_> = measurements
-            .iter()
+            .into_iter()
             .filter(|m| m.state != "Empty")
             .collect();
 
@@ -190,14 +201,14 @@ impl<F: ExportFormat> DataExporter<F> {
     }
 
     #[allow(dead_code)]
-    pub fn export_slot_to_file<P: AsRef<Path>>(
+    pub fn export_slot_to_file<'m, P: AsRef<Path>, I: IntoIterator<Item = &'m MeasurementPoint>>(
         &self,
         path: P,
-        measurements: &[MeasurementPoint],
+        measurements: I,
         slot_id: crate::slot::SlotId,
     ) -> Result<(), ExportError> {
         let slot_measurements: Vec<_> = measurements
-            .iter()
+            .into_iter()
             .filter(|m| m.slot_id.0 == slot_id.0 && m.state != "Empty")
             .collect();
 
@@ -223,10 +234,13 @@ impl<F: ExportFormat> DataExporter<F> {
     }
 
     #[allow(dead_code)]
-    pub fn export_to_string(&self, measurements: &[MeasurementPoint]) -> Result<String, ExportError> {
+    pub fn export_to_string<'m>(
+        &self,
+        measurements: impl IntoIterator<Item = &'m MeasurementPoint>,
+    ) -> Result<String, ExportError> {
         // Filter out Empty slots
         let filtered_measurements: Vec<_> = measurements
-            .iter()
+            .into_iter()
             .filter(|m| m.state != "Empty")
             .collect();
 

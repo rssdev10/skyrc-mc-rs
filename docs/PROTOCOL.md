@@ -472,7 +472,6 @@ From the app; listed so nobody experiments with them by accident:
 | 0x60, 0x61, 0x62, 0x66 | Firmware update (prepare, data packets, finish with image checksum, boot-loader version). Writes flash. |
 | 0x97 | Reset (`97 04`) |
 | 0x92 | "Turbo" setting |
-| 0x98 | Charge history (curve) download |
 
 ### Commands the firmware accepts
 
@@ -495,7 +494,58 @@ Two of the other commands, read-only per the firmware, were tried live on firmwa
 - **0x55** (`55 <mask>`): a 34-byte reply, mostly left over from the previous reply (the
   firmware fills only a few fields of a shared buffer). Not useful.
 
-0x56 (password change), 0x88, 0x95 (write settings), 0x97, 0x98 and 0x99 were not tried.
+0x56 (password change), 0x88, 0x95 (write settings), 0x97 and 0x99 were not tried.
+
+### 0x98: voltage history (charge curve)
+
+Read only. The official app uses it to draw a slot's voltage curve once a program has run for
+5 minutes. Verified live on firmware 1.83, on a Li-Ion cell charging in slot 4, and in the
+firmware image.
+
+Request: `0F 03 98 <mask> CKS`, where `mask` is one slot bit (`01`, `02`, `04`, `08`). Example:
+`0F 03 98 08 A0`. It works with or without the password handshake. As with other commands,
+the firmware turns the mask into one slot index.
+
+The reply is up to three frames ("pages"), sent about 100 ms apart:
+
+| Byte | Meaning |
+|------|---------|
+| 0 | `0F` |
+| 1 | Length: 2 × samples + 6 |
+| 2 | `98` |
+| 3 | Slot mask (`1 << index`) |
+| 4 | Total pages, 1-3 |
+| 5 | This page, from 1 |
+| 6 | Sampling interval in seconds |
+| 7.. | Up to 100 voltage samples, **u16 little-endian** mV (unlike 0x91, which is big-endian) |
+| last | Checksum |
+
+Captured page (slot 4, 3 pages, 4 s interval, samples 4145, 4172, 4192, 4198, ... mV; the
+frames are the test data of `HistoryPage` in `mc5000-protocol/src/bluetooth.rs`):
+`0f ce 98 08 03 01 04 31 10 4c 10 60 10 66 10 ...`. The three pages held 100 + 100 + 23
+samples × 4 s = 892 s, while the slot's status reported 910 s of program time.
+
+How the charger records the history (firmware 1.83, static analysis; the 4 s interval after
+about 10 minutes matches it):
+
+- Starting a program clears the slot's history and sets the interval to 1 s.
+- Each sample is smoothed: 0.6 × the previous sample + 0.4 × the present voltage.
+- The buffer holds 300 samples. When it is full, neighbouring pairs are averaged into 150
+  samples and the interval doubles: 1 s for the first 5 minutes, then 2 s up to 10 minutes,
+  4 s up to 20 minutes, and so on. A reply therefore spans the whole program with at most 299
+  samples. The interval is one byte: past 128 s (about 5.3 hours) it would overflow; untested.
+- A current history is kept the same way, but 0x98 sends only voltage.
+- A slot with no samples gets **no reply** (the firmware only logs `Cnt Error` on its debug
+  UART). Seen live on empty slots 1 and 3.
+
+The history **survives the end of the program**: after the same charge finished (phase 5,
+program time frozen at 1434 s), 0x98 still returned 179 samples × 8 s = 1432 s, and no samples
+were added after the end. The interval had doubled from 4 s to 8 s at 20 minutes, as the
+firmware predicts. Not yet observed: whether it survives removing the cell or a power cycle.
+
+The GUI uses 0x98 to fill holes in its own record of a program (see `docs/GUI_DESIGN.md`,
+"Graph"). It places sample `i` at program start + (i + 1) × interval, where the program start
+is the time of a status frame minus its program time.
 
 ### eneloop cell types (0x94 byte 35)
 

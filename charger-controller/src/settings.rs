@@ -19,12 +19,32 @@ impl std::fmt::Display for AppTheme {
     }
 }
 
+/// What the graph shows: the last N seconds, or everything recorded.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GraphTimeMode {
+    Roll,
+    #[default]
+    Infinite,
+}
+
+/// Default Roll window, in seconds.
+pub const DEFAULT_GRAPH_WINDOW_S: u32 = 600;
+
+fn default_graph_window_s() -> u32 {
+    DEFAULT_GRAPH_WINDOW_S
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub theme: AppTheme,
     pub language: String,
     pub save_last_device: bool,
     pub last_device_id: Option<String>,
+    #[serde(default)]
+    pub graph_time_mode: GraphTimeMode,
+    /// Roll window in seconds.
+    #[serde(default = "default_graph_window_s")]
+    pub graph_window_s: u32,
 }
 
 impl Default for Settings {
@@ -34,6 +54,8 @@ impl Default for Settings {
             language: crate::i18n::detect_system_language(),
             save_last_device: true,
             last_device_id: None,
+            graph_time_mode: GraphTimeMode::default(),
+            graph_window_s: DEFAULT_GRAPH_WINDOW_S,
         }
     }
 }

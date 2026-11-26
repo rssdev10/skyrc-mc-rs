@@ -4,33 +4,38 @@ use std::collections::{HashMap, BTreeMap};
 
 use crate::slot::SlotId;
 
+/// Where a measurement came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SampleSource {
+    /// A 0x91 status read while connected.
+    #[default]
+    Live,
+    /// The charger's own voltage history (0x98), read after the fact. Voltage only: the
+    /// charger keeps no current history it can send.
+    ChargerHistory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeasurementPoint {
     pub timestamp: DateTime<Utc>,
     pub slot_id: SlotId,
     pub voltage: f32,
-    pub current: f32,
+    /// mA; `None` when unknown (charger history).
+    pub current: Option<f32>,
     pub state: String,
     pub mode: String,
     pub resistance_milliohm: u16,
     pub elapsed_seconds: u32,
+    #[serde(default)]
+    pub source: SampleSource,
 }
 
 impl MeasurementPoint {
     #[allow(dead_code)]
     pub fn new(slot_id: SlotId, voltage: f32, current: f32) -> Self {
-        Self {
-            timestamp: Utc::now(),
-            slot_id,
-            voltage,
-            current,
-            state: String::new(),
-            mode: String::new(),
-            resistance_milliohm: 0,
-            elapsed_seconds: 0,
-        }
+        Self::new_full(slot_id, voltage, current, String::new(), String::new(), 0, 0)
     }
-    
+
     pub fn new_full(
         slot_id: SlotId,
         voltage: f32,
@@ -44,11 +49,12 @@ impl MeasurementPoint {
             timestamp: Utc::now(),
             slot_id,
             voltage,
-            current,
+            current: Some(current),
             state,
             mode,
             resistance_milliohm,
             elapsed_seconds,
+            source: SampleSource::Live,
         }
     }
 }
@@ -57,7 +63,8 @@ impl MeasurementPoint {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlotSecondData {
     pub voltage: f32,
-    pub current: f32,
+    /// mA; `None` when no sample of that second had a current.
+    pub current: Option<f32>,
     pub state: String,
     pub mode: String,
     pub resistance_milliohm: u16,
@@ -81,40 +88,120 @@ impl TimeAlignedRow {
     }
 }
 
+/// Measurements per slot, each slot's kept in time order. The graph and both CSV exports
+/// read this one buffer.
 pub struct DataLogger {
-    measurements: Vec<MeasurementPoint>,
-    max_points: usize,
+    slots: [Vec<MeasurementPoint>; 4],
+    max_points_per_slot: usize,
 }
+
+/// History samples closer than this to a live sample are not added: the live data is
+/// finer and has the current.
+const HISTORY_GAP_MIN_S: i64 = 10;
 
 impl DataLogger {
     pub fn new() -> Self {
         Self {
-            measurements: Vec::new(),
-            max_points: 1_000_000, // Support up to 1 million samples
+            slots: Default::default(),
+            max_points_per_slot: 250_000, // about 70 hours at one sample per second
         }
     }
 
     pub fn add_measurement(&mut self, measurement: MeasurementPoint) {
-        self.measurements.push(measurement);
-        
-        // Keep only the most recent measurements
-        if self.measurements.len() > self.max_points {
-            self.measurements.remove(0);
+        let Some(points) = self.slots.get_mut(measurement.slot_id.0) else {
+            return;
+        };
+        match points.last() {
+            Some(last) if last.timestamp > measurement.timestamp => {
+                let at = points.partition_point(|p| p.timestamp <= measurement.timestamp);
+                points.insert(at, measurement);
+            }
+            _ => points.push(measurement),
+        }
+        if points.len() > self.max_points_per_slot {
+            let excess = points.len() - self.max_points_per_slot;
+            points.drain(..excess);
         }
     }
-    
+
+    /// Adds the charger's voltage history (0x98) of the program that started at
+    /// `program_start` where live data is missing: before the first live sample (the app
+    /// connected late) and in gaps (a reconnect). Sample `i` is placed at
+    /// `program_start + (i + 1) * interval_s`. History added earlier for the same program is
+    /// replaced. Returns how many samples were added.
+    pub fn backfill_history(
+        &mut self,
+        slot_id: SlotId,
+        program_start: DateTime<Utc>,
+        interval_s: u8,
+        samples_mv: &[u16],
+    ) -> usize {
+        let Some(points) = self.slots.get_mut(slot_id.0) else {
+            return 0;
+        };
+        if interval_s == 0 {
+            return 0;
+        }
+        points.retain(|p| !(p.source == SampleSource::ChargerHistory && p.timestamp >= program_start));
+        let live: Vec<DateTime<Utc>> = points
+            .iter()
+            .filter(|p| p.timestamp >= program_start)
+            .map(|p| p.timestamp)
+            .collect();
+        let gap = chrono::Duration::seconds(HISTORY_GAP_MIN_S.max(i64::from(interval_s)));
+        let far_from_live = |t: DateTime<Utc>| {
+            let at = live.partition_point(|&l| l < t);
+            let near = |i: usize| live.get(i).is_some_and(|&l| (l - t).abs() < gap);
+            !(near(at) || (at > 0 && near(at - 1)))
+        };
+        let mut added = 0;
+        for (i, &mv) in samples_mv.iter().enumerate() {
+            let elapsed = (i as u32 + 1) * u32::from(interval_s);
+            let timestamp = program_start + chrono::Duration::seconds(i64::from(elapsed));
+            if !far_from_live(timestamp) {
+                continue;
+            }
+            points.push(MeasurementPoint {
+                timestamp,
+                slot_id,
+                voltage: f32::from(mv) / 1000.0,
+                current: None,
+                state: String::new(),
+                mode: String::new(),
+                resistance_milliohm: 0,
+                elapsed_seconds: elapsed,
+                source: SampleSource::ChargerHistory,
+            });
+            added += 1;
+        }
+        points.sort_by_key(|p| p.timestamp); // stable: live order is kept
+        added
+    }
+
+    /// Total number of measurements over all slots.
+    pub fn len(&self) -> usize {
+        self.slots.iter().map(Vec::len).sum()
+    }
+
+    /// All measurements in time order.
+    fn all_in_time_order(&self) -> Vec<&MeasurementPoint> {
+        let mut all: Vec<&MeasurementPoint> = self.slots.iter().flatten().collect();
+        all.sort_by_key(|p| p.timestamp);
+        all
+    }
+
     /// Generate time-aligned data with all slots per row, averaged by second.
     /// Uses forward-fill: if a slot has no data for a specific second, 
     /// the last known value for that slot is carried forward.
     pub fn get_time_aligned_data(&self) -> Vec<TimeAlignedRow> {
-        if self.measurements.is_empty() {
+        if self.len() == 0 {
             return Vec::new();
         }
 
         // Group measurements by second (truncate to second precision)
         let mut by_second: BTreeMap<i64, HashMap<u8, Vec<&MeasurementPoint>>> = BTreeMap::new();
         
-        for m in &self.measurements {
+        for m in self.slots.iter().flatten() {
             let second_ts = m.timestamp.timestamp();
             let slot_idx = m.slot_id.0 as u8;
             by_second
@@ -142,7 +229,9 @@ impl DataLogger {
                 if slot_idx < 4 && !measurements.is_empty() {
                     let count = measurements.len() as f32;
                     let avg_voltage: f32 = measurements.iter().map(|m| m.voltage).sum::<f32>() / count;
-                    let avg_current: f32 = measurements.iter().map(|m| m.current).sum::<f32>() / count;
+                    let currents: Vec<f32> = measurements.iter().filter_map(|m| m.current).collect();
+                    let avg_current = (!currents.is_empty())
+                        .then(|| currents.iter().sum::<f32>() / currents.len() as f32);
                     let avg_resistance: u16 = (measurements.iter()
                         .map(|m| m.resistance_milliohm as u32)
                         .sum::<u32>() / count as u32) as u16;
@@ -181,84 +270,93 @@ impl DataLogger {
         rows
     }
 
-    pub fn get_measurements_for_slot(&self, slot_id: SlotId) -> Vec<&MeasurementPoint> {
-        self.measurements
-            .iter()
-            .filter(|m| m.slot_id.0 == slot_id.0)
-            .collect()
+    /// The slot's measurements, oldest first.
+    pub fn get_measurements_for_slot(&self, slot_id: SlotId) -> &[MeasurementPoint] {
+        self.slots.get(slot_id.0).map_or(&[], Vec::as_slice)
     }
 
-    pub fn get_all_measurements(&self) -> &[MeasurementPoint] {
-        &self.measurements
+    /// Every measurement of every slot, in time order.
+    pub fn get_all_measurements(&self) -> Vec<&MeasurementPoint> {
+        self.all_in_time_order()
     }
 
-    pub fn get_recent_measurements(&self, count: usize) -> &[MeasurementPoint] {
-        let start = if self.measurements.len() > count {
-            self.measurements.len() - count
-        } else {
-            0
-        };
-        &self.measurements[start..]
+    /// The newest `count` measurements of all slots, oldest first.
+    pub fn get_recent_measurements(&self, count: usize) -> Vec<&MeasurementPoint> {
+        let mut all = self.all_in_time_order();
+        let start = all.len().saturating_sub(count);
+        all.drain(..start);
+        all
     }
 
     #[allow(dead_code)]
     pub fn get_measurements_since(&self, since: DateTime<Utc>) -> Vec<&MeasurementPoint> {
-        self.measurements
-            .iter()
+        self.all_in_time_order()
+            .into_iter()
             .filter(|m| m.timestamp >= since)
             .collect()
     }
 
     pub fn clear(&mut self) {
-        self.measurements.clear();
+        self.slots.iter_mut().for_each(Vec::clear);
     }
 
     #[allow(dead_code)]
     pub fn clear_slot(&mut self, slot_id: SlotId) {
-        self.measurements.retain(|m| m.slot_id.0 != slot_id.0);
+        if let Some(points) = self.slots.get_mut(slot_id.0) {
+            points.clear();
+        }
     }
 
     pub fn get_statistics(&self) -> DataStatistics {
-        if self.measurements.is_empty() {
+        if self.len() == 0 {
             return DataStatistics::default();
         }
 
         let mut slot_stats: HashMap<SlotId, SlotStatistics> = HashMap::new();
 
-        for measurement in &self.measurements {
+        for measurement in self.slots.iter().flatten() {
             let slot_stat = slot_stats.entry(measurement.slot_id).or_insert_with(|| SlotStatistics {
                 slot_id: measurement.slot_id,
                 measurement_count: 0,
                 min_voltage: measurement.voltage,
                 max_voltage: measurement.voltage,
                 avg_voltage: 0.0,
-                min_current: measurement.current,
-                max_current: measurement.current,
+                min_current: f32::INFINITY,
+                max_current: f32::NEG_INFINITY,
                 avg_current: 0.0,
                 total_voltage: 0.0,
                 total_current: 0.0,
+                current_count: 0,
             });
 
             slot_stat.measurement_count += 1;
             slot_stat.total_voltage += measurement.voltage;
-            slot_stat.total_current += measurement.current;
             slot_stat.min_voltage = slot_stat.min_voltage.min(measurement.voltage);
             slot_stat.max_voltage = slot_stat.max_voltage.max(measurement.voltage);
-            slot_stat.min_current = slot_stat.min_current.min(measurement.current);
-            slot_stat.max_current = slot_stat.max_current.max(measurement.current);
+            if let Some(current) = measurement.current {
+                slot_stat.current_count += 1;
+                slot_stat.total_current += current;
+                slot_stat.min_current = slot_stat.min_current.min(current);
+                slot_stat.max_current = slot_stat.max_current.max(current);
+            }
         }
 
         // Calculate averages
         for slot_stat in slot_stats.values_mut() {
             slot_stat.avg_voltage = slot_stat.total_voltage / slot_stat.measurement_count as f32;
-            slot_stat.avg_current = slot_stat.total_current / slot_stat.measurement_count as f32;
+            if slot_stat.current_count > 0 {
+                slot_stat.avg_current = slot_stat.total_current / slot_stat.current_count as f32;
+            } else {
+                (slot_stat.min_current, slot_stat.max_current) = (0.0, 0.0);
+            }
         }
 
+        let ends = || self.slots.iter().flat_map(|p| [p.first(), p.last()]).flatten().map(|m| m.timestamp);
         DataStatistics {
-            total_measurements: self.measurements.len(),
+            total_measurements: self.len(),
             slots: slot_stats,
-            oldest_measurement: self.measurements.first().map(|m| m.timestamp),
-            newest_measurement: self.measurements.last().map(|m| m.timestamp),
+            oldest_measurement: ends().min(),
+            newest_measurement: ends().max(),
         }
     }
 }
@@ -287,6 +385,8 @@ pub struct SlotStatistics {
     pub avg_current: f32,
     pub total_voltage: f32,
     pub total_current: f32,
+    /// Measurements with a known current (charger history has none).
+    pub current_count: usize,
 }
 
 #[cfg(test)]
@@ -304,16 +404,16 @@ mod tests {
         logger.add_measurement(MeasurementPoint {
             timestamp: base,
             slot_id: SlotId(0),
-            voltage: 1.296, current: 0.0,
+            voltage: 1.296, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         logger.add_measurement(MeasurementPoint {
             timestamp: base,
             slot_id: SlotId(3),
-            voltage: 4.083, current: 0.0,
+            voltage: 4.083, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         
         // Second 1: only slot 0 reports
@@ -321,9 +421,9 @@ mod tests {
         logger.add_measurement(MeasurementPoint {
             timestamp: t1,
             slot_id: SlotId(0),
-            voltage: 1.296, current: 0.0,
+            voltage: 1.296, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         
         // Second 2: slot 0 and slot 1 report
@@ -331,16 +431,16 @@ mod tests {
         logger.add_measurement(MeasurementPoint {
             timestamp: t2,
             slot_id: SlotId(0),
-            voltage: 1.296, current: 0.0,
+            voltage: 1.296, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         logger.add_measurement(MeasurementPoint {
             timestamp: t2,
             slot_id: SlotId(1),
-            voltage: 1.341, current: 0.0,
+            voltage: 1.341, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         
         // Second 3: only slot 0 reports
@@ -348,9 +448,9 @@ mod tests {
         logger.add_measurement(MeasurementPoint {
             timestamp: t3,
             slot_id: SlotId(0),
-            voltage: 1.296, current: 0.0,
+            voltage: 1.296, current: Some(0.0),
             state: "Idle".into(), mode: "None".into(),
-            resistance_milliohm: 0, elapsed_seconds: 0,
+            resistance_milliohm: 0, elapsed_seconds: 0, source: SampleSource::Live,
         });
         
         let rows = logger.get_time_aligned_data();
@@ -378,5 +478,80 @@ mod tests {
         assert!((rows[3].slots[1].as_ref().unwrap().voltage - 1.341).abs() < 0.001);
         assert!(rows[3].slots[3].is_some(), "slot 3 should be forward-filled from second 0");
         assert!((rows[3].slots[3].as_ref().unwrap().voltage - 4.083).abs() < 0.001);
+    }
+
+    fn live_at(base: DateTime<Utc>, s: i64) -> MeasurementPoint {
+        MeasurementPoint {
+            timestamp: base + chrono::Duration::seconds(s),
+            slot_id: SlotId(3),
+            voltage: 4.2, current: Some(500.0),
+            state: "Charging".into(), mode: "Charge".into(),
+            resistance_milliohm: 30, elapsed_seconds: s as u32, source: SampleSource::Live,
+        }
+    }
+
+    /// (seconds after `start`, source) of every slot-4 sample.
+    fn sources(logger: &DataLogger, start: DateTime<Utc>) -> Vec<(i64, SampleSource)> {
+        logger
+            .get_measurements_for_slot(SlotId(3))
+            .iter()
+            .map(|m| ((m.timestamp - start).num_seconds(), m.source))
+            .collect()
+    }
+
+    #[test]
+    fn history_fills_what_live_data_misses_and_nothing_else() {
+        let start = Utc.with_ymd_and_hms(2026, 11, 26, 10, 0, 0).unwrap();
+        let mut logger = DataLogger::new();
+        // Live from 100 s to 110 s, then a reconnect gap, then 200 s to 210 s.
+        for s in (100..=110).chain(200..=210) {
+            logger.add_measurement(live_at(start, s));
+        }
+        // 4 s history over 0..=240 s: samples at 4, 8, .., 240 s.
+        let added = logger.backfill_history(SlotId(3), start, 4, &[4150; 60]);
+        let points = sources(&logger, start);
+        let history: Vec<i64> = points.iter().filter(|p| p.1 == SampleSource::ChargerHistory).map(|p| p.0).collect();
+        assert_eq!(added, history.len());
+        assert_eq!(history.first(), Some(&4), "from the start of the program");
+        // At least 10 s from any live sample: 88 s is the last before the first one (100 s).
+        assert_eq!(history.iter().filter(|&&t| t < 100).max(), Some(&88));
+        assert!(history.iter().all(|&t| !(91..=119).contains(&t) && !(191..=219).contains(&t)),
+            "history keeps its distance from live data: {history:?}");
+        assert!(history.contains(&152), "the reconnect gap is filled");
+        assert!(points.windows(2).all(|w| w[0].0 <= w[1].0), "time order");
+        let live = points.iter().filter(|p| p.1 == SampleSource::Live).count();
+        assert_eq!(live, 22, "live data untouched");
+        let history_only = logger.get_measurements_for_slot(SlotId(3)).iter().find(|m| m.source == SampleSource::ChargerHistory).unwrap();
+        assert_eq!(history_only.current, None);
+
+        // Reading the history again replaces the earlier backfill instead of adding to it.
+        let again = logger.backfill_history(SlotId(3), start, 4, &[4150; 60]);
+        assert_eq!(again, added);
+        assert_eq!(sources(&logger, start).len(), points.len());
+    }
+
+    #[test]
+    fn measurements_stay_in_time_order_per_slot() {
+        let start = Utc.with_ymd_and_hms(2026, 11, 26, 10, 0, 0).unwrap();
+        let mut logger = DataLogger::new();
+        logger.add_measurement(live_at(start, 5));
+        logger.add_measurement(live_at(start, 1));
+        logger.add_measurement(live_at(start, 3));
+        let times: Vec<i64> = sources(&logger, start).iter().map(|p| p.0).collect();
+        assert_eq!(times, [1, 3, 5]);
+        assert_eq!(logger.len(), 3);
+        assert_eq!(logger.get_all_measurements().len(), 3);
+    }
+
+    #[test]
+    fn statistics_ignore_unknown_currents() {
+        let start = Utc.with_ymd_and_hms(2026, 11, 26, 10, 0, 0).unwrap();
+        let mut logger = DataLogger::new();
+        logger.add_measurement(live_at(start, 100));
+        logger.backfill_history(SlotId(3), start, 8, &[4100; 5]);
+        let stats = logger.get_statistics();
+        let slot = &stats.slots[&SlotId(3)];
+        assert_eq!((slot.measurement_count, slot.current_count), (6, 1));
+        assert_eq!(slot.avg_current, 500.0);
     }
 }
