@@ -146,7 +146,7 @@ impl ConfigDialogState {
 
     /// Selects an eneloop cell type and fills in its capacity and currents (the official
     /// app's defaults for the type). A current the mode does not use stays 0.
-    pub fn update_eneloop_type(&mut self, eneloop: mc5000_protocol::EneloopType) {
+    pub fn update_eneloop_type(&mut self, eneloop: skyrc_mc5000::EneloopType) {
         self.error = None;
         self.config.eneloop_type = eneloop as u8;
         let (capacity, charge, discharge) = eneloop.defaults();
@@ -163,8 +163,8 @@ impl ConfigDialogState {
     }
 
     /// The selected eneloop cell type.
-    pub fn eneloop_type(&self) -> mc5000_protocol::EneloopType {
-        mc5000_protocol::EneloopType::from_byte(self.config.eneloop_type).unwrap_or_default()
+    pub fn eneloop_type(&self) -> skyrc_mc5000::EneloopType {
+        skyrc_mc5000::EneloopType::from_byte(self.config.eneloop_type).unwrap_or_default()
     }
 
     pub fn update_mode(&mut self, new_mode: ChargeMode) {
@@ -189,7 +189,7 @@ impl ConfigDialogState {
         self.discharge_resting_input = self.config.discharge_resting_min.to_string();
         self.cycle_count_input = self.config.cycle_count.to_string();
         // A chosen eneloop type carries over to the new mode.
-        if self.chemistry == BatteryChemistry::Eneloop && eneloop != mc5000_protocol::EneloopType::default() {
+        if self.chemistry == BatteryChemistry::Eneloop && eneloop != skyrc_mc5000::EneloopType::default() {
             self.update_eneloop_type(eneloop);
         }
     }
@@ -318,7 +318,7 @@ pub fn view_config_dialog<'a>(state: &'a ConfigDialogState, profile_store: &'a c
     // eneloop cell type: sets the capacity and currents, and is sent to the charger.
     if state.chemistry == BatteryChemistry::Eneloop {
         let eneloop_picker = pick_list(
-            &mc5000_protocol::EneloopType::ALL[..],
+            &skyrc_mc5000::EneloopType::ALL[..],
             Some(state.eneloop_type()),
             AppMessage::ConfigEneloopTypeChanged,
         )

@@ -47,14 +47,14 @@ cargo clippy --workspace --all-targets -- -D warnings         # lint (must be wa
 - Protocol changes need tests on concrete byte arrays, preferably frames received from a real
   charger, including the checksum.
 - Tests must not need Bluetooth hardware. `Session` runs on any `Transport`: test it with an
-  in-memory transport, as the tests in `mc5000-protocol/src/session.rs` do.
+  in-memory transport, as the tests in `skyrc-mc5000/src/session.rs` do.
 
 ### Concurrency
 
 BLE notifications, the session's reader and poller, iced subscriptions and `Task::perform`
 futures all run concurrently with the code that sends commands.
 
-- **All charger I/O goes through `mc5000_protocol::Session`** (README, "Architecture"). It paces
+- **All charger I/O goes through `skyrc_mc5000::Session`** (README, "Architecture"). It paces
   writes and keeps command sequences from interleaving. Never write to the peripheral directly
   and never add a second polling loop.
 - **Never block the GUI thread.** No `block_on` or sleeps in `update()`; return a

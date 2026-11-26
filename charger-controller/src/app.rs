@@ -3,7 +3,7 @@ use iced::{Element, Subscription, Task, Theme};
 use std::time::{Duration, Instant};
 use std::hash::{Hash, Hasher};
 
-use mc5000_protocol::{
+use skyrc_mc5000::{
     MC5000SlotState as BtSlotState, ChargeConfig, OperationMode,
     BluetoothError, ConnectMode, DiscoveredBluetoothDevice,
     MC5000SlotStatus, Session, SessionEvent, VoltageHistory,
@@ -64,7 +64,7 @@ pub enum AppMessage {
     ShowConfigDialog(SlotId, f32),  // slot_id, current_voltage
     ConfigChemistryChanged(BatteryChemistry),
     /// eneloop cell type picked in the Configure dialog.
-    ConfigEneloopTypeChanged(mc5000_protocol::EneloopType),
+    ConfigEneloopTypeChanged(skyrc_mc5000::EneloopType),
     ConfigModeChanged(ChargeMode),
     ConfigCapacityChanged(String),
     ConfigChargeCurrentChanged(String),
@@ -233,9 +233,9 @@ struct SmartProbe {
 
 /// How long Smart waits for a resistance reading before keeping the probe current.
 const SMART_PROBE_TIMEOUT: Duration =
-    Duration::from_secs(mc5000_protocol::charging::SMART_PROBE_TIMEOUT_S);
+    Duration::from_secs(skyrc_mc5000::charging::SMART_PROBE_TIMEOUT_S);
 /// Charger-reported run time before the resistance reading is trusted.
-const SMART_PROBE_SETTLE_S: u32 = mc5000_protocol::charging::SMART_PROBE_SETTLE_S;
+const SMART_PROBE_SETTLE_S: u32 = skyrc_mc5000::charging::SMART_PROBE_SETTLE_S;
 /// A program re-sent to a running slot (Smart switching from its probe to the chosen
 /// current). The charger stops the old program and starts the new one, so it reports the slot
 /// idle in between; that idle is not shown.
@@ -454,7 +454,7 @@ impl ChargerApp {
                 }
                 Task::perform(
                     async move {
-                        mc5000_protocol::MC5000Protocol::scan_for_device(&pid, 5)
+                        skyrc_mc5000::MC5000Protocol::scan_for_device(&pid, 5)
                             .await
                             .map_err(|e| e.to_string())
                     },
@@ -2397,7 +2397,7 @@ mod tests {
 
     #[test]
     fn eneloop_type_sets_defaults_survives_a_mode_change_and_reaches_the_charger() {
-        use mc5000_protocol::EneloopType;
+        use skyrc_mc5000::EneloopType;
         let mut app = create_test_app();
         let _ = app.update(AppMessage::ConfigureSlot(SlotId(1)));
         app.config_dialog_state = Some(crate::ui::components::config_dialog::ConfigDialogState::new(1.3));
@@ -2457,7 +2457,7 @@ mod tests {
         let mut discharging = status(4, 4094, 504);
         discharging.state = BtSlotState::Discharging;
         discharging.mode = Some(OperationMode::Discharge);
-        discharging.chemistry = Some(mc5000_protocol::BatteryChemistry::LiIon);
+        discharging.chemistry = Some(skyrc_mc5000::BatteryChemistry::LiIon);
         let _ = app.update(AppMessage::StatusReceived(discharging));
         assert_eq!(app.slots[3].state, SlotState::Discharging);
         assert_eq!(app.reported_modes[3].as_deref(), Some("Li-Ion Discharge"));
@@ -2537,7 +2537,7 @@ mod tests {
     /// A transport that accepts every write and never answers.
     struct NullTransport;
 
-    impl mc5000_protocol::Transport for NullTransport {
+    impl skyrc_mc5000::Transport for NullTransport {
         fn write<'a>(&'a self, _: &'a [u8]) -> futures::future::BoxFuture<'a, Result<(), BluetoothError>> {
             Box::pin(async { Ok(()) })
         }
@@ -2681,17 +2681,17 @@ mod tests {
     /// need a session but not a reply.
     struct SilentCharger;
 
-    impl mc5000_protocol::Transport for SilentCharger {
+    impl skyrc_mc5000::Transport for SilentCharger {
         fn write<'a>(
             &'a self,
             _packet: &'a [u8],
-        ) -> futures::future::BoxFuture<'a, Result<(), mc5000_protocol::BluetoothError>> {
+        ) -> futures::future::BoxFuture<'a, Result<(), skyrc_mc5000::BluetoothError>> {
             Box::pin(async { Ok(()) })
         }
         fn is_connected(&self) -> futures::future::BoxFuture<'_, bool> {
             Box::pin(async { true })
         }
-        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), mc5000_protocol::BluetoothError>> {
+        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), skyrc_mc5000::BluetoothError>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -2919,7 +2919,7 @@ mod tests {
             program_start: chrono::Utc::now() - chrono::Duration::seconds(892),
             elapsed_s: 892,
         };
-        let history = |samples: usize| mc5000_protocol::VoltageHistory {
+        let history = |samples: usize| skyrc_mc5000::VoltageHistory {
             slot_id: 4,
             interval_s: 4,
             samples_mv: vec![4198; samples],

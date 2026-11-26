@@ -1,7 +1,7 @@
 //! MC5000 Charger Controller CLI
 //!
 //! Command-line interface for the MC5000 battery charger. Every command talks to the
-//! charger through [`mc5000_protocol::Session`], the same connection the GUI uses.
+//! charger through [`skyrc_mc5000::Session`], the same connection the GUI uses.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use mc5000_protocol::{
+use skyrc_mc5000::{
     charging, BatteryChemistry, ChargeConfig, ConnectMode, MC5000Protocol, MC5000SlotState,
     MC5000SlotStatus, OperationMode, Session, SessionEvent,
 };
@@ -380,7 +380,7 @@ fn running_mask(statuses: &[Option<MC5000SlotStatus>; 4]) -> u8 {
 fn error_name(code: Option<u8>) -> String {
     match code {
         None | Some(0) => "-".to_string(),
-        Some(c) => mc5000_protocol::bluetooth::charger_error_text(c)
+        Some(c) => skyrc_mc5000::bluetooth::charger_error_text(c)
             .map_or_else(|| format!("code {c}"), str::to_string),
     }
 }
@@ -429,8 +429,8 @@ async fn run_info(verbose: bool) -> Result<(), Box<dyn Error>> {
 fn info_report(
     name: &str,
     id: &str,
-    info: Option<&mc5000_protocol::MC5000DeviceInfo>,
-    settings: Option<&mc5000_protocol::MC5000SystemSettings>,
+    info: Option<&skyrc_mc5000::MC5000DeviceInfo>,
+    settings: Option<&skyrc_mc5000::MC5000SystemSettings>,
     slots: &[Option<MC5000SlotStatus>; 4],
 ) -> String {
     let unknown = || "unknown".to_string();
@@ -735,7 +735,7 @@ async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>>
 }
 
 /// The idle, non-empty cells in `slots` with their detected chemistry; prints why the
-/// others are skipped. Detection is shared with the GUI (`mc5000_protocol::charging`).
+/// others are skipped. Detection is shared with the GUI (`skyrc_mc5000::charging`).
 fn detect_cells(
     slots: &[u8],
     statuses: &[Option<MC5000SlotStatus>; 4],
@@ -999,7 +999,7 @@ fn format_time(seconds: u32) -> String {
 }
 
 /// Prints one received frame with a byte-level breakdown.
-fn print_frame(frame: &mc5000_protocol::Frame) {
+fn print_frame(frame: &skyrc_mc5000::Frame) {
     let data = frame.bytes();
     let now = chrono::Local::now().format("%H:%M:%S%.3f");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1011,7 +1011,7 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
         0x06 => println!("TYPE: Greeting (unsolicited)"),
         0x57 => {
             println!("TYPE: Device Info Response");
-            match mc5000_protocol::MC5000DeviceInfo::parse_from_response(data) {
+            match skyrc_mc5000::MC5000DeviceInfo::parse_from_response(data) {
                 Ok(info) => println!(
                     "  Model: {}  FW: {}  HW: {}",
                     info.serial_number, info.firmware_version, info.hardware_version
@@ -1024,7 +1024,7 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
             if data.get(4) == Some(&1) { "accepted" } else { "rejected" }
         ),
         0x65 => println!("TYPE: Firmware-update flag reply"),
-        0x96 => match mc5000_protocol::MC5000SystemSettings::parse_from_response(data) {
+        0x96 => match skyrc_mc5000::MC5000SystemSettings::parse_from_response(data) {
             Ok(s) => println!("TYPE: System settings {s:?}"),
             Err(_) => println!("TYPE: System settings (not decoded)"),
         },
@@ -1145,12 +1145,12 @@ mod tests {
     #[test]
     fn info_report_lists_versions_and_slots() {
         // Replies read from an MC5000 with firmware 1.83.
-        let info = mc5000_protocol::MC5000DeviceInfo::parse_from_response(&[
+        let info = skyrc_mc5000::MC5000DeviceInfo::parse_from_response(&[
             0x0F, 0x13, 0x57, 0x00, 0x31, 0x30, 0x30, 0x32, 0x31, 0x34, 0x04, 0x00, 0x00, 0x00,
             0x00, 0x01, 0x53, 0x01, 0x00, 0x7F, 0x57,
         ])
         .unwrap();
-        let settings = mc5000_protocol::MC5000SystemSettings::parse_from_response(&[
+        let settings = skyrc_mc5000::MC5000SystemSettings::parse_from_response(&[
             0x0F, 0x09, 0x96, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x98,
         ])
         .unwrap();

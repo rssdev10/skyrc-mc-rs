@@ -75,24 +75,24 @@ impl BatteryChemistry {
     }
 
     /// Convert slot chemistry to bluetooth chemistry
-    pub fn to_bluetooth_chemistry(self) -> mc5000_protocol::BatteryChemistry {
+    pub fn to_bluetooth_chemistry(self) -> skyrc_mc5000::BatteryChemistry {
         match self {
-            BatteryChemistry::LiIon => mc5000_protocol::BatteryChemistry::LiIon,
-            BatteryChemistry::LiIonHV => mc5000_protocol::BatteryChemistry::LiIonHV,
-            BatteryChemistry::LiFePO4 => mc5000_protocol::BatteryChemistry::LiFePO4,
-            BatteryChemistry::NiMH => mc5000_protocol::BatteryChemistry::NiMH,
-            BatteryChemistry::NiCd => mc5000_protocol::BatteryChemistry::NiCd,
-            BatteryChemistry::Eneloop => mc5000_protocol::BatteryChemistry::Eneloop,
-            BatteryChemistry::NiZn => mc5000_protocol::BatteryChemistry::NiZn,
-            BatteryChemistry::RAM => mc5000_protocol::BatteryChemistry::RAM,
-            BatteryChemistry::LTO => mc5000_protocol::BatteryChemistry::LTO,
-            BatteryChemistry::NaIon => mc5000_protocol::BatteryChemistry::NaIon,
+            BatteryChemistry::LiIon => skyrc_mc5000::BatteryChemistry::LiIon,
+            BatteryChemistry::LiIonHV => skyrc_mc5000::BatteryChemistry::LiIonHV,
+            BatteryChemistry::LiFePO4 => skyrc_mc5000::BatteryChemistry::LiFePO4,
+            BatteryChemistry::NiMH => skyrc_mc5000::BatteryChemistry::NiMH,
+            BatteryChemistry::NiCd => skyrc_mc5000::BatteryChemistry::NiCd,
+            BatteryChemistry::Eneloop => skyrc_mc5000::BatteryChemistry::Eneloop,
+            BatteryChemistry::NiZn => skyrc_mc5000::BatteryChemistry::NiZn,
+            BatteryChemistry::RAM => skyrc_mc5000::BatteryChemistry::RAM,
+            BatteryChemistry::LTO => skyrc_mc5000::BatteryChemistry::LTO,
+            BatteryChemistry::NaIon => skyrc_mc5000::BatteryChemistry::NaIon,
         }
     }
 
     /// Convert bluetooth chemistry to slot chemistry
-    pub fn from_bluetooth_chemistry(chemistry: mc5000_protocol::BatteryChemistry) -> Self {
-        use mc5000_protocol::BatteryChemistry as B;
+    pub fn from_bluetooth_chemistry(chemistry: skyrc_mc5000::BatteryChemistry) -> Self {
+        use skyrc_mc5000::BatteryChemistry as B;
         match chemistry {
             B::LiIon => BatteryChemistry::LiIon,
             B::LiIonHV => BatteryChemistry::LiIonHV,

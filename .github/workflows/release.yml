@@ -13,7 +13,7 @@ env:
 
 jobs:
   package-protocol:
-    name: package mc5000-protocol
+    name: package skyrc-mc5000
     runs-on: ubuntu-24.04
 
     steps:
@@ -28,8 +28,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo package --locked -p mc5000-protocol --allow-dirty --no-verify
-          crate_file=$(find target/package -maxdepth 1 -name 'mc5000-protocol-*.crate' -print -quit)
+          cargo package --locked -p skyrc-mc5000 --allow-dirty --no-verify
+          crate_file=$(find target/package -maxdepth 1 -name 'skyrc-mc5000-*.crate' -print -quit)
           crate_name=$(basename "$crate_file")
           mkdir -p dist
           cp "$crate_file" "dist/$crate_name"
@@ -48,7 +48,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
-          name: mc5000-protocol
+          name: skyrc-mc5000
           path: |
             dist/${{ steps.protocol.outputs.crate_name }}
             dist/${{ steps.protocol.outputs.crate_name }}.sha256

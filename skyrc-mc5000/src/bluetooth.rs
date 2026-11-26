@@ -1101,13 +1101,13 @@ pub struct ChargeConfig {
     /// Discharge cutoff current in mA (typ. 100mA)
     pub discharge_cutoff_current_ma: u16,
     /// Trickle charge current in mA (for NiMH/NiCd maintenance, typ. 50mA)
-    /// Encoded as ÷10 single byte at data[23] (0x05 = 50mA)
+    /// Encoded as ÷10 single byte at `data[23]` (0x05 = 50mA)
     pub trickle_charge_ma: u16,
     /// Keep/float voltage in mV (NiMH float voltage, e.g. 1300mV = 1.3V)
     /// Encoded as BE u16 at data[24-25]
     pub keep_voltage_mv: u16,
     /// Delta-peak voltage in mV (for NiMH/NiCd charge termination, typ. 6mV)
-    /// Encoded as single byte at data[22]
+    /// Encoded as single byte at `data[22]`
     pub delta_peak_mv: u16,
     /// Cutoff timer in minutes (safety timeout, typ. 60-120, 0=off)
     /// Encoded as BE u16 at data[27-28]
@@ -1128,7 +1128,7 @@ pub struct ChargeConfig {
     /// Encoded at data[18-19] BE. Confirmed series 5: 10-11 min typical.
     pub discharge_resting_min: u16,
     /// Number of charge/discharge cycles (for Cycle mode).
-    /// Encoded at data[20] as single byte. Default 1, confirmed up to 2 in series 5.
+    /// Encoded at `data[20]` as single byte. Default 1, confirmed up to 2 in series 5.
     pub cycle_count: u8,
     /// eneloop cell type (0x94 byte 35), used only when `chemistry` is eneloop.
     pub eneloop_type: EneloopType,

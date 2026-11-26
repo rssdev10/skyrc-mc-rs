@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "mc5000-protocol",
+    "skyrc-mc5000",
     "charger-controller",
     "charger-controller-cli",
 ]

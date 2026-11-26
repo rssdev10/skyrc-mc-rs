@@ -717,12 +717,12 @@ dependencies = [
  "iced",
  "image",
  "log",
- "mc5000-protocol",
  "open",
  "rfd",
  "rust-i18n",
  "serde",
  "serde_json",
+ "skyrc-mc5000",
  "sys-locale",
  "thiserror 2.0.21",
  "tokio",
@@ -737,7 +737,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "env_logger",
- "mc5000-protocol",
+ "skyrc-mc5000",
  "tokio",
 ]
 
@@ -2555,19 +2555,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mc5000-protocol"
-version = "0.3.1"
-dependencies = [
- "btleplug",
- "futures",
- "log",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "uuid",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4148,6 +4135,19 @@ checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
 dependencies = [
  "bytemuck",
  "read-fonts 0.41.0",
+]
+
+[[package]]
+name = "skyrc-mc5000"
+version = "0.1.0"
+dependencies = [
+ "btleplug",
+ "futures",
+ "log",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
