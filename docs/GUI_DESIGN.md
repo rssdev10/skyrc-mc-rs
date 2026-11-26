@@ -20,7 +20,7 @@ ChargerApp (state machine)
 
 ### State
 
-- `ChargerApp` holds connection state, the scanned chargers, the shared `mc5000_protocol::Session`
+- `ChargerApp` holds connection state, the scanned chargers, the shared `skyrc_mc5000::Session`
   while connected, 4 slot states, data logger, config dialog state
 - `ConnectionStatus`: Disconnected | Connecting | Connected | Error
 - `SlotState`: Idle | Charging | Discharging | Completed | Paused | Error

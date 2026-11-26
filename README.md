@@ -9,14 +9,22 @@ This project results from reverse‑engineering the SkyRC Android application's 
 
 This workspace consists of three crates:
 
-### 1. `mc5000-protocol` - Protocol Library
-Core library implementing the MC5000 Bluetooth communication protocol.
+### 1. `skyrc-mc5000` - Protocol Library
+Core library implementing the MC5000 Bluetooth communication protocol, published on crates.io
+on its own version line (see [skyrc-mc5000/README.md](skyrc-mc5000/README.md) and its
+[CHANGELOG](skyrc-mc5000/CHANGELOG.md)).
 
-```bash
+```toml
 # Use as a dependency
 [dependencies]
-mc5000-protocol = { path = "../mc5000-protocol" }
+skyrc-mc5000 = "0.1"
 ```
+
+Its `ble` feature (default) brings Bluetooth LE; `default-features = false` builds the frames,
+`Session` and charging rules without a Bluetooth stack.
+
+The apps in this workspace depend on it by path (`{ path = "../skyrc-mc5000", version = "0.1" }`),
+so they always build against the library in the same commit.
 
 **Features:**
 - Bluetooth device scanning and connection
@@ -100,7 +108,7 @@ cargo run -p charger-controller-cli -- --help
 cargo build
 
 # Build specific crate
-cargo build -p mc5000-protocol
+cargo build -p skyrc-mc5000
 cargo build -p charger-controller
 cargo build -p charger-controller-cli
 ```
@@ -166,7 +174,7 @@ charger-cli monitor
 ## Auto-Charge Feature
 
 Unattended charging comes in two flavours, the same in the CLI and the GUI (rules in
-`mc5000-protocol/src/charging.rs`). Both detect the chemistry from the resting voltage:
+`skyrc-mc5000/src/charging.rs`). Both detect the chemistry from the resting voltage:
 Li-Ion at 2.7 V or more, NiMH below 1.5 V. Other voltages fit several chemistries and are
 skipped (configure those slots manually); Li-Ion HV is never chosen.
 
@@ -202,21 +210,21 @@ charger-cli smart     # or the GUI's SmartCharge button
 
 | Crate | Path | Responsibility |
 |-------|------|----------------|
-| `mc5000-protocol` | `mc5000-protocol/src/` | `session.rs`: `Session`, the one connection every front end uses (connect with retry, paced polling, frame reassembly, start/stop sequences). `transport.rs`: the `Transport` trait a session runs on, with the Bluetooth LE implementation and a placeholder for a future wired (serial) link that fails until that protocol is known; a new link implements `Transport` and calls `Session::open`. `bluetooth.rs`: BLE transport (scan, connect, write, notifications), packet builders, checksum, response parsers, `BatteryChemistry`, `OperationMode`, `ChargeConfig`. The only crate that knows the wire format. |
+| `skyrc-mc5000` | `skyrc-mc5000/src/` | `session.rs`: `Session`, the one connection every front end uses (connect with retry, paced polling, frame reassembly, start/stop sequences). `transport.rs`: the `Transport` trait a session runs on, with the Bluetooth LE implementation and a placeholder for a future wired (serial) link that fails until that protocol is known; a new link implements `Transport` and calls `Session::open`. `bluetooth.rs`: BLE transport (scan, connect, write, notifications), packet builders, checksum, response parsers, `BatteryChemistry`, `OperationMode`, `ChargeConfig`. The only crate that knows the wire format. |
 | `charger-controller` | `charger-controller/src/` | iced GUI. `app.rs` is the state machine (`ChargerApp`, `AppMessage`, `update`, `subscription`); `ui/` holds views; `slot.rs`, `data.rs`, `export.rs` hold slot state, sample logging and CSV export; `settings.rs`, `profiles.rs`, `slot_persist.rs` persist user data via `confy`; `i18n.rs` plus `locales/*.json` provide translations. `control.rs` is the text control channel used by headless mode (see below). |
 | `charger-controller-cli` | `charger-controller-cli/src/main.rs` | `charger-cli` binary (clap). One async function per subcommand, all through `Session`. |
 
 Rules that follow from this split:
 
 - Wire-format knowledge (command bytes, offsets, scaling, checksums, chemistry and mode bytes) lives
-  only in `mc5000-protocol`. The GUI and CLI use its builders and parsers and never hand-assemble
+  only in `skyrc-mc5000`. The GUI and CLI use its builders and parsers and never hand-assemble
   packets.
-- All charger I/O goes through `mc5000_protocol::Session`: status (`read_status`,
+- All charger I/O goes through `skyrc_mc5000::Session`: status (`read_status`,
   `start_polling`, `subscribe`), starting slots (`start_slots`) and stopping them (`stop_slots`).
   Do not open a second connection path or write to the peripheral directly.
 - Reuse the existing enums and helpers (`BatteryChemistry`, `OperationMode`, `ChargeConfig`
   builders) instead of duplicating logic.
-- Keep the public API of `mc5000-protocol` stable unless a breaking change is intended.
+- Keep the public API of `skyrc-mc5000` stable unless a breaking change is intended.
 
 ### Concurrency model
 
@@ -295,6 +303,11 @@ MC5000_VERBOSE=1 cargo run -p charger-controller   # verbose logging
 MC5000_DEBUG=1   cargo run -p charger-controller   # raw packet dumps (implies verbose)
 ```
 
+The library itself never prints; it logs through the `log` crate. The apps map
+`MC5000_VERBOSE` to the library's debug level and `MC5000_DEBUG` to its trace level (every
+frame sent and received, as `TX frame` / `RX frame`). `RUST_LOG` works as usual, e.g.
+`RUST_LOG=skyrc_mc5000=trace`.
+
 The GUI keeps `settings.toml`, `profiles.toml` and `slot_configs.toml` in:
 
 - macOS: `~/Library/Application Support/com.mc5000.charger/` (the app's bundle identifier)
@@ -315,9 +328,18 @@ The GUI keeps `settings.toml`, `profiles.toml` and `slot_configs.toml` in:
 - Manual pre-release build: run the `build and release` workflow with `workflow_dispatch`
 - Release build: publishing a GitHub release triggers the same workflow and uploads assets to the release
 
+Versions and tags:
+
+- The apps share the workspace version and are released with `v*` tags (GitHub release,
+  binaries). They are marked `publish = false`.
+- The `skyrc-mc5000` library has its own version in `skyrc-mc5000/Cargo.toml` and is
+  published to crates.io separately (`cargo publish -p skyrc-mc5000`), tagged
+  `skyrc-mc5000-v<version>`. An app release does not require a library release, nor the
+  reverse. CI checks the library's docs and package on every pull request.
+
 Generated assets are separated into:
 
-- `mc5000-protocol` crate package
+- `skyrc-mc5000` crate package
 - `charger-cli` portable archives for Linux, Windows, and macOS
 - `charger-controller` portable archives for Linux and Windows
 - `MC5000Charger.app` zipped bundle and `MC5000Charger.dmg` for macOS

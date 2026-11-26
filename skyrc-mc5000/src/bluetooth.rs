@@ -1,41 +1,19 @@
+#[cfg(feature = "ble")]
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
+#[cfg(feature = "ble")]
 use btleplug::platform::{Manager, Peripheral};
+#[cfg(feature = "ble")]
 use std::collections::BTreeSet;
+#[cfg(feature = "ble")]
 use std::time::Duration;
-use thiserror::Error;
+#[cfg(feature = "ble")]
 use tokio::time;
+#[cfg(feature = "ble")]
 use uuid::Uuid;
 
-/// Check if debug output is enabled via MC5000_DEBUG env var
-fn debug_enabled() -> bool {
-    std::env::var("MC5000_DEBUG").is_ok()
-}
 
-/// Check if verbose output is enabled via MC5000_VERBOSE env var
-fn verbose_enabled() -> bool {
-    std::env::var("MC5000_VERBOSE").is_ok() || debug_enabled()
-}
-
-/// Print debug message if debugging is enabled
-macro_rules! debug_print {
-    ($($arg:tt)*) => {
-        if debug_enabled() {
-            println!($($arg)*);
-        }
-    };
-}
-
-/// Print verbose message if verbose mode is enabled
-macro_rules! verbose_print {
-    ($($arg:tt)*) => {
-        if verbose_enabled() {
-            println!("[VERBOSE] {}", format!($($arg)*));
-        }
-    };
-}
-
-#[derive(Debug, Error)]
-pub enum BluetoothError {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
     #[error("Bluetooth adapter not found")]
     AdapterNotFound,
     #[error("Device not found: {0}")]
@@ -49,18 +27,21 @@ pub enum BluetoothError {
     #[error("Characteristic not found: {0}")]
     CharacteristicNotFound(String),
     #[error("Bluetooth error: {0}")]
-    BluetoothError(String),
+    Error(String),
 }
 
-impl From<btleplug::Error> for BluetoothError {
+#[cfg(feature = "ble")]
+impl From<btleplug::Error> for Error {
     fn from(error: btleplug::Error) -> Self {
-        BluetoothError::BluetoothError(error.to_string())
+        Error::Error(error.to_string())
     }
 }
 
 
+/// A charger found by a Bluetooth scan.
+#[cfg(feature = "ble")]
 #[derive(Debug, Clone)]
-pub struct DiscoveredBluetoothDevice {
+pub struct DiscoveredCharger {
     pub id: String,
     pub name: String,
     pub address: String,
@@ -69,12 +50,19 @@ pub struct DiscoveredBluetoothDevice {
     pub peripheral: Peripheral,
 }
 
+/// Frame builders (associated functions, always available) and, with the `ble` feature, the
+/// Bluetooth LE connection to one charger.
 #[derive(Debug, Clone)]
-pub struct MC5000Protocol {
+pub struct Protocol {
+    #[cfg(feature = "ble")]
     peripheral: Option<Peripheral>,
+    #[cfg(feature = "ble")]
     service_uuid: Option<Uuid>,
+    #[cfg(feature = "ble")]
     command_char: Option<Uuid>,
+    #[cfg(feature = "ble")]
     response_char: Option<Uuid>,
+    #[cfg(feature = "ble")]
     notify_char: Option<Uuid>,
 }
 
@@ -353,21 +341,33 @@ impl BatteryChemistry {
     }
 }
 
-impl Default for MC5000Protocol {
+impl Default for Protocol {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MC5000Protocol {
+impl Protocol {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "ble")]
             peripheral: None,
+            #[cfg(feature = "ble")]
             service_uuid: None,
+            #[cfg(feature = "ble")]
             command_char: None,
+            #[cfg(feature = "ble")]
             response_char: None,
+            #[cfg(feature = "ble")]
             notify_char: None,
         }
+    }
+
+    /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
+    pub(crate) fn name_suffix(name: &str) -> Option<String> {
+        let suffix = name.rsplit(['-', '_', ' ']).next()?;
+        (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| suffix.to_ascii_uppercase())
     }
 
     /// Calculate sum checksum for MC5000 protocol packets (sum of all bytes mod 256)
@@ -412,7 +412,7 @@ impl MC5000Protocol {
     }
 
     /// Build the 0x96 system-settings read (`96 04`, as the official app sends it). Read
-    /// only; the reply parses with [`MC5000SystemSettings::parse_from_response`].
+    /// only; the reply parses with [`SystemSettings::parse_from_response`].
     pub fn build_system_settings_query() -> Vec<u8> {
         Self::build_packet(CMD_SYSTEM_SETTINGS, &[0x04])
     }
@@ -474,9 +474,9 @@ impl MC5000Protocol {
     ///
     /// Fails, without building anything, when the chemistry has no such mode (for example
     /// Storage for NiMH): sending another mode's byte would run a different program.
-    pub fn build_charge_config_command(config: &ChargeConfig) -> Result<Vec<u8>, BluetoothError> {
+    pub fn build_charge_config_command(config: &ChargeConfig) -> Result<Vec<u8>, Error> {
         let mode_byte = config.mode.to_byte_for_chemistry(config.chemistry).ok_or_else(|| {
-            BluetoothError::CommunicationError(format!(
+            Error::CommunicationError(format!(
                 "{:?} has no {:?} mode",
                 config.chemistry, config.mode
             ))
@@ -612,13 +612,17 @@ impl MC5000Protocol {
         Ok(Self::build_packet(CMD_CHARGE_CONFIG, &data))
     }
 
+}
+
+#[cfg(feature = "ble")]
+impl Protocol {
     /// Scan for available Bluetooth devices
-    pub async fn scan_devices(timeout_secs: u64) -> Result<Vec<DiscoveredBluetoothDevice>, BluetoothError> {
+    pub async fn scan_devices(timeout_secs: u64) -> Result<Vec<DiscoveredCharger>, Error> {
         let manager = Manager::new().await?;
         let adapters = manager.adapters().await?;
         
         if adapters.is_empty() {
-            return Err(BluetoothError::AdapterNotFound);
+            return Err(Error::AdapterNotFound);
         }
 
         let central = &adapters[0];
@@ -640,8 +644,8 @@ impl MC5000Protocol {
             if let Some(properties) = properties {
                 let name = properties.local_name.clone().unwrap_or_else(|| "Unknown Device".to_string());
                 let address = properties.address.to_string();
-                let is_mc5000 = Self::is_mc5000_device(&name, &properties.address);
-                devices.push(DiscoveredBluetoothDevice {
+                let is_mc5000 = Self::is_mc5000_device(&name);
+                devices.push(DiscoveredCharger {
                     id: peripheral.id().to_string(),
                     name: name.clone(),
                     address,
@@ -658,12 +662,12 @@ impl MC5000Protocol {
     /// Quick scan targeting a specific peripheral ID. Returns early as soon as the
     /// target is seen, so it is much faster than a full scan when the device is nearby.
     /// Returns `None` when the device was not seen within `timeout_secs`.
-    pub async fn scan_for_device(target_id: &str, timeout_secs: u64) -> Result<Option<DiscoveredBluetoothDevice>, BluetoothError> {
+    pub async fn scan_for_device(target_id: &str, timeout_secs: u64) -> Result<Option<DiscoveredCharger>, Error> {
         let manager = Manager::new().await?;
         let adapters = manager.adapters().await?;
 
         if adapters.is_empty() {
-            return Err(BluetoothError::AdapterNotFound);
+            return Err(Error::AdapterNotFound);
         }
 
         let central = &adapters[0];
@@ -682,8 +686,8 @@ impl MC5000Protocol {
                         let name = properties.local_name.clone()
                             .unwrap_or_else(|| "Unknown Device".to_string());
                         let address = properties.address.to_string();
-                        let is_mc5000 = Self::is_mc5000_device(&name, &properties.address);
-                        found = Some(DiscoveredBluetoothDevice {
+                        let is_mc5000 = Self::is_mc5000_device(&name);
+                        found = Some(DiscoveredCharger {
                             id: peripheral.id().to_string(),
                             name,
                             address,
@@ -709,7 +713,7 @@ impl MC5000Protocol {
     /// The charger does not advertise its service UUID, so the name is all there is.
     /// Units advertise as `#Charger-XXXX` (some stacks drop the `#`), where `XXXX` is
     /// the end of the unit's own address.
-    fn is_mc5000_device(name: &str, _properties: &btleplug::api::BDAddr) -> bool {
+    fn is_mc5000_device(name: &str) -> bool {
         let name_lower = name.to_lowercase();
         name_lower.contains("mc5000")
             || name_lower.contains("skyrc")
@@ -718,27 +722,20 @@ impl MC5000Protocol {
             || (name_lower.starts_with("charger") && Self::name_suffix(name).is_some())
     }
 
-    /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
-    pub(crate) fn name_suffix(name: &str) -> Option<String> {
-        let suffix = name.rsplit(['-', '_', ' ']).next()?;
-        (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
-            .then(|| suffix.to_ascii_uppercase())
-    }
-
     /// Connect to a specific MC5000 device (with full init sequence)
-    pub async fn connect(&mut self, peripheral: &Peripheral) -> Result<(), BluetoothError> {
+    pub async fn connect(&mut self, peripheral: &Peripheral) -> Result<(), Error> {
         self.connect_impl(peripheral, true).await
     }
     
     /// Connect to a specific MC5000 device without init sequence.
     /// Use for status-only queries to avoid disrupting running operations.
-    pub async fn connect_without_init(&mut self, peripheral: &Peripheral) -> Result<(), BluetoothError> {
+    pub async fn connect_without_init(&mut self, peripheral: &Peripheral) -> Result<(), Error> {
         self.connect_impl(peripheral, false).await
     }
     
-    async fn connect_impl(&mut self, peripheral: &Peripheral, send_init: bool) -> Result<(), BluetoothError> {
-        verbose_print!("connect() called for device: {}", peripheral.id());
-        debug_print!("[DEBUG] Starting connection to device: {}", peripheral.id());
+    async fn connect_impl(&mut self, peripheral: &Peripheral, send_init: bool) -> Result<(), Error> {
+        log::debug!("connect() called for device: {}", peripheral.id());
+        log::trace!("Starting connection to device: {}", peripheral.id());
         
         // Check if already connected (with timeout)
         let is_connected = tokio::time::timeout(
@@ -747,57 +744,57 @@ impl MC5000Protocol {
         ).await.unwrap_or(Ok(false)).unwrap_or(false);
         
         if is_connected {
-            verbose_print!("Already connected, skipping connection attempt");
+            log::debug!("Already connected, skipping connection attempt");
         } else {
             // Connect to device (with timeout)
-            verbose_print!("Initiating BLE connection...");
-            debug_print!("[DEBUG] Attempting BLE connection...");
+            log::debug!("Initiating BLE connection...");
+            log::trace!("Attempting BLE connection...");
             tokio::time::timeout(
                 Duration::from_secs(10),
                 peripheral.connect()
             ).await
                 .map_err(|_| {
-                    verbose_print!("✗ BLE connection timed out");
-                    BluetoothError::ConnectionFailed("Connection timeout".to_string())
+                    log::debug!("✗ BLE connection timed out");
+                    Error::ConnectionFailed("Connection timeout".to_string())
                 })?
                 .map_err(|e| {
-                    verbose_print!("✗ BLE connection failed: {}", e);
-                    println!("[ERROR] BLE connection failed: {}", e);
-                    BluetoothError::ConnectionFailed(e.to_string())
+                    log::debug!("✗ BLE connection failed: {}", e);
+                    log::error!("BLE connection failed: {}", e);
+                    Error::ConnectionFailed(e.to_string())
                 })?;
-            verbose_print!("✓ BLE connection established");
-            debug_print!("[DEBUG] BLE connection successful");
+            log::debug!("✓ BLE connection established");
+            log::trace!("BLE connection successful");
         }
 
         // Wait for connection to establish
-        debug_print!("[DEBUG] Waiting for connection to stabilize...");
+        log::trace!("Waiting for connection to stabilize...");
         time::sleep(Duration::from_millis(1000)).await;
         
         // Verify connection status
         let is_connected = peripheral.is_connected().await.unwrap_or(false);
-        debug_print!("[DEBUG] Connection status verified: {}", is_connected);
+        log::trace!("Connection status verified: {}", is_connected);
         if !is_connected {
-            return Err(BluetoothError::ConnectionFailed("Device reports not connected after connection attempt".to_string()));
+            return Err(Error::ConnectionFailed("Device reports not connected after connection attempt".to_string()));
         }
 
         // Discover services
-        debug_print!("[DEBUG] Starting service discovery...");
+        log::trace!("Starting service discovery...");
         peripheral.discover_services().await
             .map_err(|e| {
-                println!("[ERROR] Service discovery failed: {}", e);
-                BluetoothError::BluetoothError(e.to_string())
+                log::error!("Service discovery failed: {}", e);
+                Error::Error(e.to_string())
             })?;
-        debug_print!("[DEBUG] Service discovery completed");
+        log::trace!("Service discovery completed");
 
         // Debug: print all discovered service UUIDs
         let services = peripheral.services();
-        debug_print!("[DEBUG] Discovered {} services:", services.len());
-        println!("[INFO] Discovered {} services:", services.len());
+        log::trace!("Discovered {} services:", services.len());
+        log::debug!("Discovered {} services:", services.len());
         for (i, s) in services.iter().enumerate() {
-            debug_print!("[DEBUG]   Service {}: {}", i+1, s.uuid);
-            println!("[INFO]   Service {}: {} ({} characteristics)", i+1, s.uuid, s.characteristics.len());
+            log::trace!("  Service {}: {}", i+1, s.uuid);
+            log::debug!("  Service {}: {} ({} characteristics)", i+1, s.uuid, s.characteristics.len());
             for (j, c) in s.characteristics.iter().enumerate() {
-                println!("[INFO]     Char {}: {} - Properties: {:?}", j+1, c.uuid, c.properties);
+                log::debug!("    Char {}: {} - Properties: {:?}", j+1, c.uuid, c.properties);
             }
         }
 
@@ -813,26 +810,26 @@ impl MC5000Protocol {
                 })
             })
             .ok_or_else(|| {
-                println!("[ERROR] No suitable MC5000 service found. Available services:");
+                log::error!("No suitable MC5000 service found. Available services:");
                 for s in &services {
-                    println!("[ERROR]   - {} ({} chars)", s.uuid, s.characteristics.len());
+                    log::error!("  - {} ({} chars)", s.uuid, s.characteristics.len());
                     for c in &s.characteristics {
-                        println!("[ERROR]     - {}: {:?}", c.uuid, c.properties);
+                        log::error!("    - {}: {:?}", c.uuid, c.properties);
                     }
                 }
-                BluetoothError::ServiceNotFound("No service with WRITE characteristics".to_string())
+                Error::ServiceNotFound("No service with WRITE characteristics".to_string())
             })?;
         
         let service_uuid = service.uuid;
-        debug_print!("[DEBUG] Selected MC5000 service: {}", service.uuid);
-        println!("[INFO] Using service: {}", service.uuid);
+        log::trace!("Selected MC5000 service: {}", service.uuid);
+        log::debug!("Using service: {}", service.uuid);
 
         // Debug: print all discovered characteristic UUIDs for this service
-        debug_print!("[DEBUG] Discovered {} characteristics for service {}:", service.characteristics.len(), service_uuid);
-        println!("[INFO] Discovered characteristics:");
+        log::trace!("Discovered {} characteristics for service {}:", service.characteristics.len(), service_uuid);
+        log::debug!("Discovered characteristics:");
         for (i, c) in service.characteristics.iter().enumerate() {
-            debug_print!("[DEBUG]   Char {}: {} Properties: {:?}", i+1, c.uuid, c.properties);
-            println!("[INFO]   - {}: Properties: {:?}", c.uuid, c.properties);
+            log::trace!("  Char {}: {} Properties: {:?}", i+1, c.uuid, c.properties);
+            log::debug!("  - {}: Properties: {:?}", c.uuid, c.properties);
         }
 
         // Find characteristics dynamically based on properties
@@ -845,11 +842,11 @@ impl MC5000Protocol {
             .map(|c| c.uuid);
         
         if command_char.is_some() {
-            verbose_print!("✓ Command characteristic found: {:?}", command_char);
-            println!("[INFO] Command characteristic: {:?}", command_char);
+            log::debug!("✓ Command characteristic found: {:?}", command_char);
+            log::debug!("Command characteristic: {:?}", command_char);
         } else {
-            verbose_print!("✗ Command characteristic NOT found");
-            println!("[ERROR] No WRITE characteristic found!");
+            log::debug!("✗ Command characteristic NOT found");
+            log::error!("No WRITE characteristic found!");
         }
 
         let notify_char = service.characteristics
@@ -858,7 +855,7 @@ impl MC5000Protocol {
             .map(|c| c.uuid);
         
         if notify_char.is_some() {
-            println!("[INFO] Notify characteristic: {:?}", notify_char);
+            log::debug!("Notify characteristic: {:?}", notify_char);
         } else {
             // If no NOTIFY, try INDICATE
             let indicate_char = service.characteristics
@@ -866,7 +863,7 @@ impl MC5000Protocol {
                 .find(|c| c.properties.contains(btleplug::api::CharPropFlags::INDICATE))
                 .map(|c| c.uuid);
             if indicate_char.is_some() {
-                println!("[INFO] Indicate characteristic (using instead of notify): {:?}", indicate_char);
+                log::debug!("Indicate characteristic (using instead of notify): {:?}", indicate_char);
             }
         }
 
@@ -875,7 +872,7 @@ impl MC5000Protocol {
 
         // Subscribe to notifications if available
         if let Some(notify_uuid) = notify_char {
-            verbose_print!("Subscribing to notifications on characteristic: {}", notify_uuid);
+            log::debug!("Subscribing to notifications on characteristic: {}", notify_uuid);
             peripheral.subscribe(&btleplug::api::Characteristic {
                 uuid: notify_uuid,
                 service_uuid,
@@ -883,12 +880,12 @@ impl MC5000Protocol {
                 descriptors: BTreeSet::new(),
             }).await
                 .map_err(|e| {
-                    println!("[ERROR] Notification subscription failed: {}", e);
-                    BluetoothError::BluetoothError(e.to_string())
+                    log::error!("Notification subscription failed: {}", e);
+                    Error::Error(e.to_string())
                 })?;
-            verbose_print!("✓ Successfully subscribed to notifications");
+            log::debug!("✓ Successfully subscribed to notifications");
         } else {
-            verbose_print!("WARNING: No notification characteristic found!");
+            log::debug!("WARNING: No notification characteristic found!");
         }
 
         self.peripheral = Some(peripheral.clone());
@@ -897,11 +894,11 @@ impl MC5000Protocol {
         self.response_char = response_char;
         self.notify_char = notify_char;
 
-        debug_print!("[DEBUG] Connection setup complete:");
-        debug_print!("[DEBUG]   Service UUID: {:?}", service_uuid);
-        debug_print!("[DEBUG]   Command char: {:?}", command_char);
-        debug_print!("[DEBUG]   Response char: {:?}", response_char);
-        debug_print!("[DEBUG]   Notify char: {:?}", notify_char);
+        log::trace!("Connection setup complete:");
+        log::trace!("  Service UUID: {:?}", service_uuid);
+        log::trace!("  Command char: {:?}", command_char);
+        log::trace!("  Response char: {:?}", response_char);
+        log::trace!("  Notify char: {:?}", notify_char);
         
         // Send handshake to activate device communication. It carries the last two
         // address bytes, which the charger also advertises in its name ("#Charger-FF34").
@@ -915,10 +912,10 @@ impl MC5000Protocol {
             .as_deref()
             .and_then(Self::name_suffix)
             .unwrap_or_else(|| "FF34".to_string());
-        verbose_print!("Sending handshake (0x57) with suffix {}...", suffix);
+        log::debug!("Sending handshake (0x57) with suffix {}...", suffix);
         let handshake = Self::build_device_info_command(&suffix);
         self.send_command(&handshake).await?;
-        verbose_print!("✓ Handshake sent, waiting for device response...");
+        log::debug!("✓ Handshake sent, waiting for device response...");
         
         // Wait briefly for device to process handshake
         time::sleep(Duration::from_millis(500)).await;
@@ -926,16 +923,16 @@ impl MC5000Protocol {
         // Send initialization commands matching official app sequence:
         // version(0x74) → settings(0x65); never the general 0xFE query, which stops all slots
         // Without these, the device may ignore control commands like stop.
-        verbose_print!("Sending init sequence (0x74, 0x65)...");
+        log::debug!("Sending init sequence (0x74, 0x65)...");
         if send_init {
             self.send_init_sequence().await?;
-            verbose_print!("✓ Init sequence complete");
+            log::debug!("✓ Init sequence complete");
         } else {
-            verbose_print!("(init sequence skipped — read-only mode)");
+            log::debug!("(init sequence skipped — read-only mode)");
         }
         
         log::info!("Successfully connected to MC5000 device: {}", peripheral.id());
-        debug_print!("[SUCCESS] MC5000 connection established and ready for commands");
+        log::trace!("MC5000 connection established and ready for commands");
         Ok(())
     }
 
@@ -946,7 +943,7 @@ impl MC5000Protocol {
     /// program** (verified on a live charger), so it is deliberately not sent: connecting
     /// must never stop a charge. Start and stop sequences select their slot with a per-slot
     /// FE query instead, and work without any init.
-    pub async fn send_init_sequence(&self) -> Result<(), BluetoothError> {
+    pub async fn send_init_sequence(&self) -> Result<(), Error> {
         let version_cmd = Self::build_version_command();
         self.send_command(&version_cmd).await?;
         time::sleep(Duration::from_millis(200)).await;
@@ -972,7 +969,7 @@ impl MC5000Protocol {
     }
 
     /// Disconnect from device
-    pub async fn disconnect(&mut self) -> Result<(), BluetoothError> {
+    pub async fn disconnect(&mut self) -> Result<(), Error> {
         if let Some(ref peripheral) = self.peripheral {
             peripheral.disconnect().await?;
             log::info!("Disconnected from MC5000 device");
@@ -988,29 +985,29 @@ impl MC5000Protocol {
     }
 
     /// Send command to device
-    pub async fn send_command(&self, command: &[u8]) -> Result<(), BluetoothError> {
-        verbose_print!("send_command called with {} bytes", command.len());
+    pub async fn send_command(&self, command: &[u8]) -> Result<(), Error> {
+        log::debug!("send_command called with {} bytes", command.len());
         
         let peripheral = self.peripheral.as_ref()
             .ok_or_else(|| {
-                verbose_print!("ERROR: Not connected to device");
-                BluetoothError::CommunicationError("Not connected".to_string())
+                log::debug!("ERROR: Not connected to device");
+                Error::CommunicationError("Not connected".to_string())
             })?;
-        verbose_print!("Peripheral reference obtained");
+        log::debug!("Peripheral reference obtained");
 
         let command_uuid = self.command_char
             .ok_or_else(|| {
-                verbose_print!("ERROR: Command characteristic not found");
-                BluetoothError::CharacteristicNotFound("Command characteristic".to_string())
+                log::debug!("ERROR: Command characteristic not found");
+                Error::CharacteristicNotFound("Command characteristic".to_string())
             })?;
-        verbose_print!("Command characteristic UUID: {}", command_uuid);
+        log::debug!("Command characteristic UUID: {}", command_uuid);
 
         let service_uuid = self.service_uuid
             .ok_or_else(|| {
-                verbose_print!("ERROR: Service UUID not stored");
-                BluetoothError::ServiceNotFound("Service UUID not initialized".to_string())
+                log::debug!("ERROR: Service UUID not stored");
+                Error::ServiceNotFound("Service UUID not initialized".to_string())
             })?;
-        verbose_print!("Service UUID: {}", service_uuid);
+        log::debug!("Service UUID: {}", service_uuid);
 
         // Use WRITE_WITHOUT_RESPONSE which matches the actual characteristic properties
         let characteristic = btleplug::api::Characteristic {
@@ -1020,55 +1017,35 @@ impl MC5000Protocol {
             descriptors: BTreeSet::new(),
         };
 
-        debug_print!("[DEBUG] Outgoing BLE command: {:02X?}", command);
-        if command.len() == 21 && debug_enabled() {
-            debug_print!("  Start byte: 0x{:02X}", command[0]);
-            debug_print!("  Command: 0x{:02X}", command[1]);
-            match command[1] {
-                0x57 => debug_print!("  (Version Info Request)"),
-                0x61 => debug_print!("  (Get Basic Data)"),
-                0x55 => debug_print!("  (Get Channel Data, channel: 0x{:02X})", command[2]),
-                0x05 => debug_print!("  (Start Charging, channel bitmask: 0x{:02X})", command[2]),
-                _ => debug_print!("  (Unknown/Other Command)"),
-            }
-            debug_print!("  Payload: {:02X?}", &command[2..20]);
-            debug_print!("  Checksum: 0x{:02X}", command[20]);
-        } else if command.len() != 21 {
-            debug_print!("[WARN] Outgoing command length is not 21 bytes: {}", command.len());
-        }
-        
-        verbose_print!("Writing {} bytes to characteristic UUID: {}", command.len(), command_uuid);
-        verbose_print!("Command data: {:02X?}", command);
-        debug_print!("[DEBUG] Writing to characteristic...");
+        log::trace!("TX frame: {:02X?}", command);
         
         match peripheral.write(&characteristic, command, WriteType::WithoutResponse).await {
             Ok(_) => {
-                verbose_print!("✓ Write completed successfully");
-                debug_print!("[DEBUG] Write completed");
+                log::trace!("Write completed");
                 log::debug!("Sent command: {:?}", command);
                 Ok(())
             }
             Err(e) => {
-                verbose_print!("✗ Write failed: {}", e);
+                log::debug!("✗ Write failed: {}", e);
                 Err(e.into())
             }
         }
     }
 
     /// Request slot status (fire-and-forget, response comes via notification)
-    pub async fn request_slot_status(&self, slot_id: u8) -> Result<(), BluetoothError> {
-        verbose_print!("request_slot_status called for slot {}", slot_id);
+    pub async fn request_slot_status(&self, slot_id: u8) -> Result<(), Error> {
+        log::debug!("request_slot_status called for slot {}", slot_id);
         
         // Convert slot ID to channel bitmask (slot 1=0x01, 2=0x02, 3=0x04, 4=0x08)
         let channel_mask = 1u8 << (slot_id - 1);
-        verbose_print!("Channel mask for slot {}: 0x{:02X}", slot_id, channel_mask);
+        log::debug!("Channel mask for slot {}: 0x{:02X}", slot_id, channel_mask);
         
         // Build proper 0x91 status request command
         let status_command = Self::build_channel_status_command(channel_mask);
-        verbose_print!("Status command: {:02X?}", status_command);
+        log::debug!("Status command: {:02X?}", status_command);
         
         self.send_command(&status_command).await?;
-        verbose_print!("Status request sent successfully");
+        log::debug!("Status request sent successfully");
         
         Ok(())
     }
@@ -1101,13 +1078,13 @@ pub struct ChargeConfig {
     /// Discharge cutoff current in mA (typ. 100mA)
     pub discharge_cutoff_current_ma: u16,
     /// Trickle charge current in mA (for NiMH/NiCd maintenance, typ. 50mA)
-    /// Encoded as ÷10 single byte at data[23] (0x05 = 50mA)
+    /// Encoded as ÷10 single byte at `data[23]` (0x05 = 50mA)
     pub trickle_charge_ma: u16,
     /// Keep/float voltage in mV (NiMH float voltage, e.g. 1300mV = 1.3V)
     /// Encoded as BE u16 at data[24-25]
     pub keep_voltage_mv: u16,
     /// Delta-peak voltage in mV (for NiMH/NiCd charge termination, typ. 6mV)
-    /// Encoded as single byte at data[22]
+    /// Encoded as single byte at `data[22]`
     pub delta_peak_mv: u16,
     /// Cutoff timer in minutes (safety timeout, typ. 60-120, 0=off)
     /// Encoded as BE u16 at data[27-28]
@@ -1128,7 +1105,7 @@ pub struct ChargeConfig {
     /// Encoded at data[18-19] BE. Confirmed series 5: 10-11 min typical.
     pub discharge_resting_min: u16,
     /// Number of charge/discharge cycles (for Cycle mode).
-    /// Encoded at data[20] as single byte. Default 1, confirmed up to 2 in series 5.
+    /// Encoded at `data[20]` as single byte. Default 1, confirmed up to 2 in series 5.
     pub cycle_count: u8,
     /// eneloop cell type (0x94 byte 35), used only when `chemistry` is eneloop.
     pub eneloop_type: EneloopType,
@@ -1408,28 +1385,28 @@ pub struct ChargeConfigAck {
 
 impl ChargeConfigAck {
     /// Parse a short 0x94 ACK response
-    pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
+    pub fn parse_from_response(response: &[u8]) -> Result<Self, Error> {
         if response.len() < 6 {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Charge config ACK too short: {} bytes", response.len())
             ));
         }
 
         if response[0] != PACKET_START {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Invalid start marker for ACK: 0x{:02X}", response[0])
             ));
         }
 
         if response[2] != CMD_CHARGE_CONFIG {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Unexpected command in ACK: 0x{:02X}", response[2])
             ));
         }
 
-        let expected = MC5000Protocol::calculate_checksum(&response[2..response.len()-1]);
+        let expected = Protocol::calculate_checksum(&response[2..response.len()-1]);
         if expected != response[response.len()-1] {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Invalid checksum in ACK: expected 0x{:02X}, got 0x{:02X}", expected, response[response.len()-1])
             ));
         }
@@ -1445,7 +1422,7 @@ impl ChargeConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct MC5000DeviceInfo {
+pub struct DeviceInfo {
     /// The 16-byte device code from the 0x57 reply (the official app sends it as hex to
     /// SkyRC's update server).
     pub code: [u8; 16],
@@ -1456,28 +1433,28 @@ pub struct MC5000DeviceInfo {
     /// The official app reads only the low nibble of code byte 13 (e.g. "1"; the charger's
     /// menu shows 1.0).
     pub hardware_version: String,
-    /// Code bytes 0-5: the ASCII model ID, "100214" for every MC5000. Not a serial number;
-    /// the field name is kept for API stability.
-    pub serial_number: String,
+    /// Code bytes 0-5: the ASCII model ID, "100214" for every MC5000. The charger reports no
+    /// serial number.
+    pub model_id: String,
     pub slot_count: u8,
 }
 
-impl MC5000DeviceInfo {
+impl DeviceInfo {
     /// Parse device info from 0x57 command response
     /// Response: `0f 13 57 00` + 16 code bytes + checksum (21 bytes), e.g.
     /// `0f 13 57 00 31 30 30 32 31 34 04 00 00 00 00 01 52 01 00 80 57`. Code bytes:
     /// 0-5 model ID, 8-9 OEM, 11-12 firmware, 13 hardware (low nibble), 15 check byte.
-    pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
+    pub fn parse_from_response(response: &[u8]) -> Result<Self, Error> {
         // Check minimum length and start marker
         if response.len() < 6 {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Response too short: {} bytes", response.len())
             ));
         }
 
         // Check packet start marker
         if response[0] != PACKET_START {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Invalid start marker: 0x{:02X}", response[0])
             ));
         }
@@ -1490,34 +1467,34 @@ impl MC5000DeviceInfo {
             CMD_GREETING => {
                 // Greeting packet: 0f 04 06 01 01 08
                 // This is the initial unsolicited notification
-                Ok(MC5000DeviceInfo {
+                Ok(DeviceInfo {
                     code: [0; 16],
                     oem: "Unknown".to_string(),
                     firmware_version: "Unknown".to_string(),
                     hardware_version: "Unknown".to_string(),
-                    serial_number: "Unknown".to_string(),
+                    model_id: "Unknown".to_string(),
                     slot_count: 4,
                 })
             }
             CMD_DEVICE_INFO => {
                 if response.len() < 21 {
-                    return Err(BluetoothError::CommunicationError(
+                    return Err(Error::CommunicationError(
                         format!("Device info response too short: {} bytes", response.len())
                     ));
                 }
                 // The 16 code bytes follow `0f 13 57 00`.
                 let code: [u8; 16] = response[4..20].try_into().expect("16 bytes");
-                Ok(MC5000DeviceInfo {
+                Ok(DeviceInfo {
                     code,
                     oem: format!("{:02X}{:02X}", code[8], code[9]),
                     firmware_version: format!("{}.{:02}", code[11], code[12]),
                     hardware_version: (code[13] & 0x0F).to_string(),
-                    serial_number: String::from_utf8_lossy(&code[0..6]).to_string(),
+                    model_id: String::from_utf8_lossy(&code[0..6]).to_string(),
                     slot_count: 4,
                 })
             }
             _ => {
-                Err(BluetoothError::CommunicationError(
+                Err(Error::CommunicationError(
                     format!("Unexpected response command: 0x{:02X}", command)
                 ))
             }
@@ -1543,8 +1520,8 @@ pub struct HistoryPage {
 
 impl HistoryPage {
     /// Parses a checksum-validated 0x98 frame.
-    pub fn parse(frame: &[u8]) -> Result<Self, BluetoothError> {
-        let bad = |why: &str| BluetoothError::CommunicationError(format!("0x98 page: {why}"));
+    pub fn parse(frame: &[u8]) -> Result<Self, Error> {
+        let bad = |why: &str| Error::CommunicationError(format!("0x98 page: {why}"));
         if frame.len() < 8 || frame[0] != PACKET_START || frame[2] != CMD_VOLTAGE_HISTORY {
             return Err(bad("not a history frame"));
         }
@@ -1610,7 +1587,7 @@ impl VoltageHistory {
 /// them into its settings screen but their value ranges are not documented. 0x96 only
 /// reads; this client never writes them (0x95).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MC5000SystemSettings {
+pub struct SystemSettings {
     pub system_beep: u8,
     pub notification_beep: u8,
     pub end_beep: u8,
@@ -1619,11 +1596,11 @@ pub struct MC5000SystemSettings {
     pub sleep: u8,
 }
 
-impl MC5000SystemSettings {
+impl SystemSettings {
     /// Parses `0f 09 96 <x> <beep> <notify> <end> <lcd> <warning> <sleep> <sum>`.
-    pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
+    pub fn parse_from_response(response: &[u8]) -> Result<Self, Error> {
         if response.len() < 11 || response[0] != PACKET_START || response[2] != CMD_SYSTEM_SETTINGS {
-            return Err(BluetoothError::CommunicationError(format!(
+            return Err(Error::CommunicationError(format!(
                 "Not a system settings reply: {response:02X?}"
             )));
         }
@@ -1639,9 +1616,9 @@ impl MC5000SystemSettings {
 }
 
 #[derive(Debug, Clone)]
-pub struct MC5000SlotStatus {
+pub struct SlotStatus {
     pub slot_id: u8,
-    pub state: MC5000SlotState,
+    pub state: SlotState,
     pub voltage_mv: u16,
     pub current_ma: u16,
     pub capacity_mah: u32,
@@ -1697,7 +1674,7 @@ pub fn charger_error_text(code: u8) -> Option<&'static str> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MC5000SlotState {
+pub enum SlotState {
     Empty,
     Idle,
     Charging,     // Generic charging
@@ -1709,26 +1686,26 @@ pub enum MC5000SlotState {
     Paused,
 }
 
-impl MC5000SlotStatus {
+impl SlotStatus {
     /// Parse channel status from 0x91 command response
     /// Response format: 0f 15 91 <channel:1> <current_hi:1> <current_lo:1> <voltage:2> ...
-    pub fn parse_from_response(response: &[u8]) -> Result<Self, BluetoothError> {
+    pub fn parse_from_response(response: &[u8]) -> Result<Self, Error> {
         if response.len() < 10 {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Channel status response too short: {} bytes", response.len())
             ));
         }
 
         // Check packet start marker
         if response[0] != PACKET_START {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Invalid start marker: 0x{:02X}", response[0])
             ));
         }
 
         let command = response[2];
         if command != CMD_CHANNEL_STATUS {
-            return Err(BluetoothError::CommunicationError(
+            return Err(Error::CommunicationError(
                 format!("Expected channel status response (0x91), got 0x{:02X}", command)
             ));
         }
@@ -1793,27 +1770,27 @@ impl MC5000SlotStatus {
         let mode = chemistry.and_then(|c| OperationMode::from_byte_for_chemistry(response[19], c));
 
         let state = if voltage_mv == 0 {
-            MC5000SlotState::Empty
+            SlotState::Empty
         } else {
             match phase {
-                Some(phase::IDLE) => MC5000SlotState::Idle,
-                Some(phase::CHARGING) => MC5000SlotState::Charging,
-                Some(phase::DISCHARGING) => MC5000SlotState::Discharging,
-                Some(phase::DONE | phase::FINISHED) => MC5000SlotState::Completed,
+                Some(phase::IDLE) => SlotState::Idle,
+                Some(phase::CHARGING) => SlotState::Charging,
+                Some(phase::DISCHARGING) => SlotState::Discharging,
+                Some(phase::DONE | phase::FINISHED) => SlotState::Completed,
                 // Waiting to start and resting between stages: the program is running.
-                Some(phase::WAITING | phase::RESTING) => MC5000SlotState::Paused,
+                Some(phase::WAITING | phase::RESTING) => SlotState::Paused,
                 // Unknown phase values: fall back to what the current says.
-                Some(_) if current_ma > 0 => MC5000SlotState::Charging,
-                Some(_) if elapsed_seconds > 0 => MC5000SlotState::Paused,
-                Some(_) => MC5000SlotState::Idle,
+                Some(_) if current_ma > 0 => SlotState::Charging,
+                Some(_) if elapsed_seconds > 0 => SlotState::Paused,
+                Some(_) => SlotState::Idle,
                 // Short frame (other firmware): current-based guess, direction unknown.
-                None if current_ma > 0 => MC5000SlotState::Charging,
-                None if elapsed_seconds > 0 => MC5000SlotState::Completed,
-                None => MC5000SlotState::Idle,
+                None if current_ma > 0 => SlotState::Charging,
+                None if elapsed_seconds > 0 => SlotState::Completed,
+                None => SlotState::Idle,
             }
         };
 
-        Ok(MC5000SlotStatus {
+        Ok(SlotStatus {
             slot_id,
             state,
             voltage_mv,
@@ -1833,11 +1810,11 @@ impl MC5000SlotStatus {
     pub fn is_running(&self) -> bool {
         matches!(
             self.state,
-            MC5000SlotState::Charging
-                | MC5000SlotState::ChargingCC
-                | MC5000SlotState::ChargingCV
-                | MC5000SlotState::Discharging
-                | MC5000SlotState::Paused
+            SlotState::Charging
+                | SlotState::ChargingCC
+                | SlotState::ChargingCV
+                | SlotState::Discharging
+                | SlotState::Paused
         )
     }
 
@@ -1863,25 +1840,25 @@ mod tests {
 
     #[test]
     fn name_suffix_takes_the_trailing_hex_unit_id() {
-        assert_eq!(MC5000Protocol::name_suffix("#Charger-FF34").as_deref(), Some("FF34"));
-        assert_eq!(MC5000Protocol::name_suffix("Charger-e56a").as_deref(), Some("E56A"));
-        assert_eq!(MC5000Protocol::name_suffix("Charger"), None);
-        assert_eq!(MC5000Protocol::name_suffix("Charger-XYZ1"), None);
+        assert_eq!(Protocol::name_suffix("#Charger-FF34").as_deref(), Some("FF34"));
+        assert_eq!(Protocol::name_suffix("Charger-e56a").as_deref(), Some("E56A"));
+        assert_eq!(Protocol::name_suffix("Charger"), None);
+        assert_eq!(Protocol::name_suffix("Charger-XYZ1"), None);
     }
 
+    #[cfg(feature = "ble")]
     #[test]
     fn detects_chargers_by_name_regardless_of_unit_id() {
-        let addr = btleplug::api::BDAddr::default();
         for name in ["#Charger-FF34", "#Charger-E56A", "Charger-E56A", "SkyRC MC5000"] {
-            assert!(MC5000Protocol::is_mc5000_device(name, &addr), "{name}");
+            assert!(Protocol::is_mc5000_device(name), "{name}");
         }
         for name in ["Charger", "Phone Charger", "43\" Crystal UHD"] {
-            assert!(!MC5000Protocol::is_mc5000_device(name, &addr), "{name}");
+            assert!(!Protocol::is_mc5000_device(name), "{name}");
         }
     }
 
-    fn parse(frame: &[u8]) -> MC5000SlotStatus {
-        MC5000SlotStatus::parse_from_response(frame).expect("valid status frame")
+    fn parse(frame: &[u8]) -> SlotStatus {
+        SlotStatus::parse_from_response(frame).expect("valid status frame")
     }
 
     // Frames received from a real charger while testing every mode.
@@ -1906,7 +1883,7 @@ mod tests {
     fn status_reports_discharging_from_the_phase_byte() {
         let s = parse(&LIION_DISCHARGING);
         assert_eq!((s.slot_id, s.current_ma, s.voltage_mv), (4, 504, 4094));
-        assert_eq!(s.state, MC5000SlotState::Discharging);
+        assert_eq!(s.state, SlotState::Discharging);
         assert_eq!(s.mode, Some(OperationMode::Discharge));
         assert_eq!(s.chemistry, Some(BatteryChemistry::LiIon));
         assert!(s.is_running());
@@ -1915,7 +1892,7 @@ mod tests {
     #[test]
     fn status_decodes_the_nickel_mode_numbering() {
         let s = parse(&NIMH_CYCLE_CHARGING);
-        assert_eq!(s.state, MC5000SlotState::Charging);
+        assert_eq!(s.state, SlotState::Charging);
         assert_eq!(s.mode, Some(OperationMode::Cycle));
         assert_eq!(s.chemistry, Some(BatteryChemistry::NiMH));
     }
@@ -1923,7 +1900,7 @@ mod tests {
     #[test]
     fn status_reports_a_program_the_charger_finished() {
         let s = parse(&NIMH_DISCHARGE_FINISHED);
-        assert_eq!(s.state, MC5000SlotState::Completed);
+        assert_eq!(s.state, SlotState::Completed);
         assert_eq!(s.mode, Some(OperationMode::Discharge));
         assert!(!s.is_running());
     }
@@ -1931,7 +1908,7 @@ mod tests {
     #[test]
     fn idle_slot_still_reports_its_configured_mode() {
         let s = parse(&NIMH_IDLE_AFTER_STOP);
-        assert_eq!(s.state, MC5000SlotState::Idle);
+        assert_eq!(s.state, SlotState::Idle);
         assert_eq!(s.mode, Some(OperationMode::Discharge));
         assert!(!s.is_running());
     }
@@ -2014,7 +1991,7 @@ mod tests {
              "0f2a94010203e803e80bb80672038400640064000a000a0100060000003c0000012c00070ce4000000000072"),
         ];
         for (chemistry, mode, frame) in captured {
-            let built = MC5000Protocol::build_charge_config_command(&nizn_ram_config(chemistry, mode)).unwrap();
+            let built = Protocol::build_charge_config_command(&nizn_ram_config(chemistry, mode)).unwrap();
             assert_eq!(built, hex(frame), "{chemistry:?} {mode:?}");
         }
     }
@@ -2022,11 +1999,11 @@ mod tests {
     /// A device-info reply captured from an MC5000 with firmware 1.82.
     #[test]
     fn device_info_reply_decodes_model_and_versions() {
-        let info = MC5000DeviceInfo::parse_from_response(&hex(
+        let info = DeviceInfo::parse_from_response(&hex(
             "0f1357003130303231340400000000015201008057",
         ))
         .unwrap();
-        assert_eq!(info.serial_number, "100214");
+        assert_eq!(info.model_id, "100214");
         assert_eq!(info.oem, "0000");
         assert_eq!(info.firmware_version, "1.82");
         assert_eq!(info.hardware_version, "1");
@@ -2062,34 +2039,34 @@ mod tests {
     #[test]
     fn waiting_and_resting_count_as_running_and_done_as_completed() {
         for (p, state) in [
-            (phase::WAITING, MC5000SlotState::Paused),
-            (phase::RESTING, MC5000SlotState::Paused),
-            (phase::DONE, MC5000SlotState::Completed),
-            (phase::FINISHED, MC5000SlotState::Completed),
+            (phase::WAITING, SlotState::Paused),
+            (phase::RESTING, SlotState::Paused),
+            (phase::DONE, SlotState::Completed),
+            (phase::FINISHED, SlotState::Completed),
         ] {
             let s = parse(&status_frame(p, 0, 0, 60));
             assert_eq!(s.state, state, "phase {p}");
-            assert_eq!(s.is_running(), state == MC5000SlotState::Paused);
+            assert_eq!(s.is_running(), state == SlotState::Paused);
         }
     }
 
     /// A reply read from an MC5000 with firmware 1.83.
     #[test]
     fn system_settings_reply_decodes_raw_values() {
-        let s = MC5000SystemSettings::parse_from_response(&hex("0f09960000000001010098")).unwrap();
+        let s = SystemSettings::parse_from_response(&hex("0f09960000000001010098")).unwrap();
         assert_eq!((s.system_beep, s.notification_beep, s.end_beep, s.lcd, s.warning, s.sleep), (0, 0, 0, 1, 1, 0));
-        assert!(MC5000SystemSettings::parse_from_response(&hex("0f0465010167")).is_err());
-        assert_eq!(MC5000Protocol::build_system_settings_query(), hex("0f0396049a"));
+        assert!(SystemSettings::parse_from_response(&hex("0f0465010167")).is_err());
+        assert_eq!(Protocol::build_system_settings_query(), hex("0f0396049a"));
     }
 
     #[test]
     fn eneloop_type_goes_into_byte_35_for_eneloop_only() {
         let mut config = ChargeConfig::new(1, BatteryChemistry::Eneloop, OperationMode::Charge, 1000, 500);
         config.eneloop_type = EneloopType::LiteAA;
-        let frame = MC5000Protocol::build_charge_config_command(&config).unwrap();
+        let frame = Protocol::build_charge_config_command(&config).unwrap();
         assert_eq!((frame.len(), frame[3 + 35]), (44, 4));
         config.chemistry = BatteryChemistry::NiMH;
-        let frame = MC5000Protocol::build_charge_config_command(&config).unwrap();
+        let frame = Protocol::build_charge_config_command(&config).unwrap();
         assert_eq!(frame[3 + 35], 0, "other chemistries send 0");
         // The official app's order (its eneloop_mode list).
         let names: Vec<_> = EneloopType::ALL.iter().map(|t| t.name()).collect();
@@ -2107,7 +2084,7 @@ mod tests {
             (BatteryChemistry::LiIon, OperationMode::BreakIn),
         ] {
             let config = ChargeConfig::new(1, chemistry, mode, 2000, 500);
-            assert!(MC5000Protocol::build_charge_config_command(&config).is_err(), "{chemistry:?} {mode:?}");
+            assert!(Protocol::build_charge_config_command(&config).is_err(), "{chemistry:?} {mode:?}");
         }
     }
 
@@ -2115,10 +2092,10 @@ mod tests {
     #[test]
     fn nizn_and_ram_status_frames_decode_their_mode() {
         let cases = [
-            ("0f1591010191043f0000000000000002014703010006bb", BatteryChemistry::NiZn, OperationMode::Discharge, MC5000SlotState::Discharging),
-            ("0f159101000005340000000000000000012e0302000605", BatteryChemistry::NiZn, OperationMode::Cycle, MC5000SlotState::Discharging),
-            ("0f15910102b3038c0000000000000004013b0301000721", BatteryChemistry::RAM, OperationMode::Discharge, MC5000SlotState::Discharging),
-            ("0f159101000005310000000000000001013e0202000713", BatteryChemistry::RAM, OperationMode::Cycle, MC5000SlotState::Charging),
+            ("0f1591010191043f0000000000000002014703010006bb", BatteryChemistry::NiZn, OperationMode::Discharge, SlotState::Discharging),
+            ("0f159101000005340000000000000000012e0302000605", BatteryChemistry::NiZn, OperationMode::Cycle, SlotState::Discharging),
+            ("0f15910102b3038c0000000000000004013b0301000721", BatteryChemistry::RAM, OperationMode::Discharge, SlotState::Discharging),
+            ("0f159101000005310000000000000001013e0202000713", BatteryChemistry::RAM, OperationMode::Cycle, SlotState::Charging),
         ];
         for (frame, chemistry, mode, state) in cases {
             let s = parse(&hex(frame));
@@ -2129,13 +2106,13 @@ mod tests {
     #[test]
     fn short_frames_fall_back_to_the_current() {
         let s = parse(&LIION_DISCHARGING[..12]);
-        assert_eq!(s.state, MC5000SlotState::Charging);
+        assert_eq!(s.state, SlotState::Charging);
         assert_eq!((s.phase, s.mode), (None, None));
     }
 
     #[test]
     fn handshake_carries_the_unit_suffix() {
-        let packet = MC5000Protocol::build_device_info_command("E56A");
+        let packet = Protocol::build_device_info_command("E56A");
         assert_eq!(&packet[..6], &[0x0F, 0x13, 0x57, 0x00, 0xE5, 0x6A]);
         assert_eq!(packet.len(), 21, "length byte 0x13 = 19 bytes after it");
         let sum = packet[2..packet.len() - 1].iter().fold(0u8, |a, &b| a.wrapping_add(b));
@@ -2146,14 +2123,14 @@ mod tests {
     #[test]
     fn handshake_matches_the_official_app() {
         assert_eq!(
-            MC5000Protocol::build_device_info_command("FF34"),
+            Protocol::build_device_info_command("FF34"),
             hex("0f135700ff343738c1a4000000000000000000005e")
         );
     }
     #[test]
     fn history_request_matches_the_official_app() {
         assert_eq!(
-            MC5000Protocol::build_voltage_history_command(0x08),
+            Protocol::build_voltage_history_command(0x08),
             vec![0x0F, 0x03, 0x98, 0x08, 0xA0]
         );
     }

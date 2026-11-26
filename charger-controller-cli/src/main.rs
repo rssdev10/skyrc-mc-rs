@@ -1,7 +1,7 @@
 //! MC5000 Charger Controller CLI
 //!
 //! Command-line interface for the MC5000 battery charger. Every command talks to the
-//! charger through [`mc5000_protocol::Session`], the same connection the GUI uses.
+//! charger through [`skyrc_mc5000::Session`], the same connection the GUI uses.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use mc5000_protocol::{
-    charging, BatteryChemistry, ChargeConfig, ConnectMode, MC5000Protocol, MC5000SlotState,
-    MC5000SlotStatus, OperationMode, Session, SessionEvent,
+use skyrc_mc5000::{
+    charging, BatteryChemistry, ChargeConfig, ConnectMode, Protocol, SlotState,
+    SlotStatus, OperationMode, Session, SessionEvent,
 };
 use tokio::runtime::Runtime;
 
@@ -215,41 +215,53 @@ fn chemistry_name(chem: BatteryChemistry) -> &'static str {
     }
 }
 
-fn state_symbol(state: &MC5000SlotState) -> &'static str {
+fn state_symbol(state: &SlotState) -> &'static str {
     match state {
-        MC5000SlotState::Idle => "○",
-        MC5000SlotState::Charging | MC5000SlotState::ChargingCC | MC5000SlotState::ChargingCV => "⚡",
-        MC5000SlotState::Discharging => "▼",
-        MC5000SlotState::Completed => "✓",
-        MC5000SlotState::Paused => "⏸",
-        MC5000SlotState::Error => "✗",
-        MC5000SlotState::Empty => "·",
+        SlotState::Idle => "○",
+        SlotState::Charging | SlotState::ChargingCC | SlotState::ChargingCV => "⚡",
+        SlotState::Discharging => "▼",
+        SlotState::Completed => "✓",
+        SlotState::Paused => "⏸",
+        SlotState::Error => "✗",
+        SlotState::Empty => "·",
     }
 }
 
-fn state_name(state: &MC5000SlotState) -> &'static str {
+fn state_name(state: &SlotState) -> &'static str {
     match state {
-        MC5000SlotState::Idle => "Idle",
-        MC5000SlotState::Charging => "Charging",
-        MC5000SlotState::ChargingCC => "CC Charge",
-        MC5000SlotState::ChargingCV => "CV Charge",
-        MC5000SlotState::Discharging => "Discharge",
-        MC5000SlotState::Completed => "Done",
-        MC5000SlotState::Paused => "Paused",
-        MC5000SlotState::Error => "Error",
-        MC5000SlotState::Empty => "Empty",
+        SlotState::Idle => "Idle",
+        SlotState::Charging => "Charging",
+        SlotState::ChargingCC => "CC Charge",
+        SlotState::ChargingCV => "CV Charge",
+        SlotState::Discharging => "Discharge",
+        SlotState::Completed => "Done",
+        SlotState::Paused => "Paused",
+        SlotState::Error => "Error",
+        SlotState::Empty => "Empty",
     }
 }
 
+
+/// Logging: `RUST_LOG` as usual; `MC5000_VERBOSE` adds the charger library's debug log and
+/// `MC5000_DEBUG` its trace log (every frame sent and received).
+fn init_logging() {
+    let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var_os("MC5000_DEBUG").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Trace);
+    } else if std::env::var_os("MC5000_VERBOSE").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Debug);
+    }
+    builder.init();
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
     let cli = Cli::parse();
 
     if cli.verbose {
         std::env::set_var("MC5000_VERBOSE", "1");
         println!("[INFO] Verbose mode enabled");
     }
+    init_logging();
 
     Runtime::new()?.block_on(run_command(cli))
 }
@@ -318,7 +330,7 @@ async fn connect(verbose: bool, mode: ConnectMode) -> Result<Session, Box<dyn Er
 async fn run_scan(verbose: bool) -> Result<(), Box<dyn Error>> {
     println!("=== Scanning for Bluetooth devices ===\n");
 
-    let devices = MC5000Protocol::scan_devices(5).await?;
+    let devices = Protocol::scan_devices(5).await?;
 
     if devices.is_empty() {
         println!("No devices found.");
@@ -339,7 +351,7 @@ async fn run_scan(verbose: bool) -> Result<(), Box<dyn Error>> {
 }
 
 /// The configured program and chemistry the charger reports, e.g. "Li-Ion Discharge".
-fn mode_name(status: &MC5000SlotStatus) -> String {
+fn mode_name(status: &SlotStatus) -> String {
     match (status.chemistry, status.mode) {
         (Some(chemistry), Some(mode)) => format!("{} {}", chemistry.name(), mode.name()),
         (None, Some(mode)) => mode.name().to_string(),
@@ -368,11 +380,11 @@ fn selected_slots(slot: Option<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 /// Mask of slots the charger reports as running a program.
-fn running_mask(statuses: &[Option<MC5000SlotStatus>; 4]) -> u8 {
+fn running_mask(statuses: &[Option<SlotStatus>; 4]) -> u8 {
     statuses
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.as_ref().is_some_and(MC5000SlotStatus::is_running))
+        .filter(|(_, s)| s.as_ref().is_some_and(SlotStatus::is_running))
         .fold(0, |mask, (i, _)| mask | 1 << i)
 }
 
@@ -380,12 +392,12 @@ fn running_mask(statuses: &[Option<MC5000SlotStatus>; 4]) -> u8 {
 fn error_name(code: Option<u8>) -> String {
     match code {
         None | Some(0) => "-".to_string(),
-        Some(c) => mc5000_protocol::bluetooth::charger_error_text(c)
+        Some(c) => skyrc_mc5000::bluetooth::charger_error_text(c)
             .map_or_else(|| format!("code {c}"), str::to_string),
     }
 }
 
-fn status_row(slot: u8, status: &MC5000SlotStatus) -> String {
+fn status_row(slot: u8, status: &SlotStatus) -> String {
     let state_str = format!("{} {}", state_symbol(&status.state), state_name(&status.state));
     let voltage = format!("{:.3}V", status.voltage_mv as f32 / 1000.0);
     let current = format!("{}mA", status.current_ma);
@@ -429,9 +441,9 @@ async fn run_info(verbose: bool) -> Result<(), Box<dyn Error>> {
 fn info_report(
     name: &str,
     id: &str,
-    info: Option<&mc5000_protocol::MC5000DeviceInfo>,
-    settings: Option<&mc5000_protocol::MC5000SystemSettings>,
-    slots: &[Option<MC5000SlotStatus>; 4],
+    info: Option<&skyrc_mc5000::DeviceInfo>,
+    settings: Option<&skyrc_mc5000::SystemSettings>,
+    slots: &[Option<SlotStatus>; 4],
 ) -> String {
     let unknown = || "unknown".to_string();
     let mut out = Vec::new();
@@ -442,10 +454,10 @@ fn info_report(
         if cfg!(target_os = "macos") { " (assigned by macOS, not the hardware address)" } else { "" }
     ));
     let model = info.map(|i| {
-        if i.serial_number == "100214" {
-            format!("SkyRC MC5000 (model ID {})", i.serial_number)
+        if i.model_id == "100214" {
+            format!("SkyRC MC5000 (model ID {})", i.model_id)
         } else {
-            format!("model ID {}", i.serial_number)
+            format!("model ID {}", i.model_id)
         }
     });
     out.push(format!("  Model:            {}", model.unwrap_or_else(unknown)));
@@ -476,7 +488,7 @@ fn info_report(
     for (i, slot) in slots.iter().enumerate() {
         let line = match slot {
             None => "no answer".to_string(),
-            Some(s) if s.state == MC5000SlotState::Empty => "empty".to_string(),
+            Some(s) if s.state == SlotState::Empty => "empty".to_string(),
             Some(s) => {
                 let mut line = format!(
                     "{:.3} V, {}, program: {}",
@@ -560,7 +572,7 @@ async fn start_operation(
     if verbose {
         println!(
             "  Config packet: {:02x?}",
-            MC5000Protocol::build_charge_config_command(&config)
+            Protocol::build_charge_config_command(&config)
         );
         println!("  Start mask: 0x{:02X}", keep_running | config.channel_bitmask);
     }
@@ -735,10 +747,10 @@ async fn run_stop(verbose: bool, slot: Option<u8>) -> Result<(), Box<dyn Error>>
 }
 
 /// The idle, non-empty cells in `slots` with their detected chemistry; prints why the
-/// others are skipped. Detection is shared with the GUI (`mc5000_protocol::charging`).
+/// others are skipped. Detection is shared with the GUI (`skyrc_mc5000::charging`).
 fn detect_cells(
     slots: &[u8],
-    statuses: &[Option<MC5000SlotStatus>; 4],
+    statuses: &[Option<SlotStatus>; 4],
 ) -> Vec<(u8, BatteryChemistry, f32)> {
     let mut cells = Vec::new();
     for &slot_num in slots {
@@ -806,7 +818,7 @@ enum SmartOutcome {
 /// couple of seconds to start, so an idle report before that means nothing yet).
 fn smart_decision(
     chemistry: BatteryChemistry,
-    status: &MC5000SlotStatus,
+    status: &SlotStatus,
     seen_running: bool,
     timed_out: bool,
 ) -> Option<SmartOutcome> {
@@ -999,7 +1011,7 @@ fn format_time(seconds: u32) -> String {
 }
 
 /// Prints one received frame with a byte-level breakdown.
-fn print_frame(frame: &mc5000_protocol::Frame) {
+fn print_frame(frame: &skyrc_mc5000::Frame) {
     let data = frame.bytes();
     let now = chrono::Local::now().format("%H:%M:%S%.3f");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1011,10 +1023,10 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
         0x06 => println!("TYPE: Greeting (unsolicited)"),
         0x57 => {
             println!("TYPE: Device Info Response");
-            match mc5000_protocol::MC5000DeviceInfo::parse_from_response(data) {
+            match skyrc_mc5000::DeviceInfo::parse_from_response(data) {
                 Ok(info) => println!(
                     "  Model: {}  FW: {}  HW: {}",
-                    info.serial_number, info.firmware_version, info.hardware_version
+                    info.model_id, info.firmware_version, info.hardware_version
                 ),
                 Err(e) => println!("  (not decoded: {e})"),
             }
@@ -1024,7 +1036,7 @@ fn print_frame(frame: &mc5000_protocol::Frame) {
             if data.get(4) == Some(&1) { "accepted" } else { "rejected" }
         ),
         0x65 => println!("TYPE: Firmware-update flag reply"),
-        0x96 => match mc5000_protocol::MC5000SystemSettings::parse_from_response(data) {
+        0x96 => match skyrc_mc5000::SystemSettings::parse_from_response(data) {
             Ok(s) => println!("TYPE: System settings {s:?}"),
             Err(_) => println!("TYPE: System settings (not decoded)"),
         },
@@ -1101,7 +1113,7 @@ async fn run_debug(verbose: bool, duration: u64) -> Result<(), Box<dyn Error>> {
 
     println!("Requesting status for all 4 slots...\n");
     for slot in 1..=4u8 {
-        let status_cmd = MC5000Protocol::build_channel_status_command(1 << (slot - 1));
+        let status_cmd = Protocol::build_channel_status_command(1 << (slot - 1));
         println!(">>> Slot {} request: {:02X?}", slot, status_cmd);
         session.request_status(slot).await?;
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -1125,10 +1137,10 @@ async fn run_debug(verbose: bool, duration: u64) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
 
-    fn status(slot: u8, current_ma: u16) -> Option<MC5000SlotStatus> {
-        Some(MC5000SlotStatus {
+    fn status(slot: u8, current_ma: u16) -> Option<SlotStatus> {
+        Some(SlotStatus {
             slot_id: slot,
-            state: if current_ma > 0 { MC5000SlotState::Charging } else { MC5000SlotState::Idle },
+            state: if current_ma > 0 { SlotState::Charging } else { SlotState::Idle },
             voltage_mv: 3700,
             current_ma,
             capacity_mah: 0,
@@ -1145,19 +1157,19 @@ mod tests {
     #[test]
     fn info_report_lists_versions_and_slots() {
         // Replies read from an MC5000 with firmware 1.83.
-        let info = mc5000_protocol::MC5000DeviceInfo::parse_from_response(&[
+        let info = skyrc_mc5000::DeviceInfo::parse_from_response(&[
             0x0F, 0x13, 0x57, 0x00, 0x31, 0x30, 0x30, 0x32, 0x31, 0x34, 0x04, 0x00, 0x00, 0x00,
             0x00, 0x01, 0x53, 0x01, 0x00, 0x7F, 0x57,
         ])
         .unwrap();
-        let settings = mc5000_protocol::MC5000SystemSettings::parse_from_response(&[
+        let settings = skyrc_mc5000::SystemSettings::parse_from_response(&[
             0x0F, 0x09, 0x96, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x98,
         ])
         .unwrap();
         let mut full = status(2, 0).unwrap();
         full.error = Some(13);
         let mut empty = status(1, 0).unwrap();
-        empty.state = MC5000SlotState::Empty;
+        empty.state = SlotState::Empty;
         let report = info_report("#Charger-FF34", "id", Some(&info), Some(&settings), &[Some(empty), Some(full), None, status(4, 500)]);
         for expected in [
             "SkyRC MC5000 (model ID 100214)",

@@ -521,7 +521,7 @@ The reply is up to three frames ("pages"), sent about 100 ms apart:
 | last | Checksum |
 
 Captured page (slot 4, 3 pages, 4 s interval, samples 4145, 4172, 4192, 4198, ... mV; the
-frames are the test data of `HistoryPage` in `mc5000-protocol/src/bluetooth.rs`):
+frames are the test data of `HistoryPage` in `skyrc-mc5000/src/bluetooth.rs`):
 `0f ce 98 08 03 01 04 31 10 4c 10 60 10 66 10 ...`. The three pages held 100 + 100 + 23
 samples × 4 s = 892 s, while the slot's status reported 910 s of program time.
 
@@ -603,7 +603,7 @@ The checksum is the **SUM (mod 256)** of all bytes from the command byte to the 
 Frames are delimited by their length byte, not by BLE notifications. With a 20-byte notification
 payload (the BLE default on some platforms), a 23-byte 0x91 status frame arrives in two
 notifications; on macOS it arrives whole. The receiver (`FrameDecoder` in
-`mc5000-protocol/src/session.rs`) reassembles frames, accepts one only when its checksum matches,
+`skyrc-mc5000/src/session.rs`) reassembles frames, accepts one only when its checksum matches,
 and resynchronizes on the next `0x0F` otherwise. It does not require a particular frame length,
 so a firmware that sends longer status frames still decodes.
 

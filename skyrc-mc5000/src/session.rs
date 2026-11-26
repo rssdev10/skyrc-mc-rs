@@ -15,11 +15,16 @@
 //! never interleaves with a start/stop sequence.
 
 use crate::bluetooth::{
-    BluetoothError, ChargeConfig, DiscoveredBluetoothDevice, HistoryPage, MC5000DeviceInfo,
-    MC5000Protocol, MC5000SlotStatus, MC5000SystemSettings, StartStopAction, VoltageHistory,
+    Error, ChargeConfig, HistoryPage, DeviceInfo,
+    Protocol, SlotStatus, SystemSettings, StartStopAction, VoltageHistory,
     CMD_VOLTAGE_HISTORY,
 };
-use crate::transport::{BleTransport, IncomingBytes, Transport};
+#[cfg(feature = "ble")]
+use crate::bluetooth::DiscoveredCharger;
+#[cfg(feature = "ble")]
+use crate::transport::BleTransport;
+use crate::transport::{IncomingBytes, Transport};
+#[cfg(feature = "ble")]
 use btleplug::api::Peripheral as _;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -41,10 +46,13 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MAX_WRITE_TIMEOUTS: u32 = 2;
 /// While polling, a link that delivers nothing for this long is declared lost.
 pub const LINK_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(feature = "ble")]
 /// Time allowed for one connection attempt: BLE link, service discovery, handshake, init.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "ble")]
 /// How long [`Session::connect`] scans for a charger whose handle no longer works.
 pub const RESCAN_TIMEOUT_SECS: u64 = 5;
+#[cfg(feature = "ble")]
 /// Connection attempts before giving up. The link is torn down between attempts.
 pub const CONNECT_ATTEMPTS: u32 = 2;
 
@@ -86,11 +94,11 @@ impl Frame {
     }
 
     /// The decoded slot status, if this is a 0x91 status frame for a known slot.
-    pub fn status(&self) -> Option<MC5000SlotStatus> {
+    pub fn status(&self) -> Option<SlotStatus> {
         if self.command() != CMD_CHANNEL_STATUS {
             return None;
         }
-        MC5000SlotStatus::parse_from_response(&self.0)
+        SlotStatus::parse_from_response(&self.0)
             .ok()
             .filter(|s| (1..=4).contains(&s.slot_id))
     }
@@ -268,11 +276,11 @@ fn abort(handle: &Mutex<Option<JoinHandle<()>>>) {
     }
 }
 
-fn slot_mask(slot: u8) -> Result<u8, BluetoothError> {
+fn slot_mask(slot: u8) -> Result<u8, Error> {
     if (1..=4).contains(&slot) {
         Ok(1 << (slot - 1))
     } else {
-        Err(BluetoothError::CommunicationError(format!(
+        Err(Error::CommunicationError(format!(
             "Invalid slot {slot}: must be 1-4"
         )))
     }
@@ -280,19 +288,14 @@ fn slot_mask(slot: u8) -> Result<u8, BluetoothError> {
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// Whether to print every received frame (`MC5000_DEBUG` set).
-fn debug_frames() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MC5000_DEBUG").is_some())
-}
-
 /// Latest status per slot (index 0 = slot 1) and when it arrived.
-type LatestStatus = [Option<(MC5000SlotStatus, Instant)>; 4];
+type LatestStatus = [Option<(SlotStatus, Instant)>; 4];
 
+#[cfg(feature = "ble")]
 impl Session {
     /// Scans for `timeout_secs` and returns the MC5000 chargers found.
-    pub async fn scan(timeout_secs: u64) -> Result<Vec<DiscoveredBluetoothDevice>, BluetoothError> {
-        let devices = MC5000Protocol::scan_devices(timeout_secs).await?;
+    pub async fn scan(timeout_secs: u64) -> Result<Vec<DiscoveredCharger>, Error> {
+        let devices = Protocol::scan_devices(timeout_secs).await?;
         Ok(devices.into_iter().filter(|d| d.is_mc5000).collect())
     }
 
@@ -301,20 +304,20 @@ impl Session {
     /// disconnected, so a handle from an earlier scan fails with "Peripheral no longer
     /// available" after a Disconnect or a lost link.
     pub async fn connect(
-        device: &DiscoveredBluetoothDevice,
+        device: &DiscoveredCharger,
         mode: ConnectMode,
-    ) -> Result<Self, BluetoothError> {
+    ) -> Result<Self, Error> {
         let first_error = match Self::connect_with_retry(device, mode).await {
             Ok(session) => return Ok(session),
             Err(e) => e,
         };
         log::info!("Looking for {} again after: {first_error}", device.name);
-        match MC5000Protocol::scan_for_device(&device.id, RESCAN_TIMEOUT_SECS).await {
+        match Protocol::scan_for_device(&device.id, RESCAN_TIMEOUT_SECS).await {
             Ok(Some(found)) => Self::connect_with_retry(&found, mode).await,
-            Ok(None) => Err(BluetoothError::ConnectionFailed(format!(
+            Ok(None) => Err(Error::ConnectionFailed(format!(
                 "{first_error}; the charger was not found again"
             ))),
-            Err(e) => Err(BluetoothError::ConnectionFailed(format!("{first_error}; {e}"))),
+            Err(e) => Err(Error::ConnectionFailed(format!("{first_error}; {e}"))),
         }
     }
 
@@ -322,9 +325,9 @@ impl Session {
     /// disconnect, so no half-open link is left behind (on Windows a stale link makes every
     /// later attempt fail).
     async fn connect_with_retry(
-        device: &DiscoveredBluetoothDevice,
+        device: &DiscoveredCharger,
         mode: ConnectMode,
-    ) -> Result<Self, BluetoothError> {
+    ) -> Result<Self, Error> {
         let mut last_error = None;
         for attempt in 1..=CONNECT_ATTEMPTS {
             let attempt_result =
@@ -335,7 +338,7 @@ impl Session {
                 }
                 Ok(Err(e)) => last_error = Some(e),
                 Err(_) => {
-                    last_error = Some(BluetoothError::ConnectionFailed(format!(
+                    last_error = Some(Error::ConnectionFailed(format!(
                         "Connection timeout ({} s)",
                         CONNECT_TIMEOUT.as_secs()
                     )))
@@ -351,8 +354,11 @@ impl Session {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
-        Err(last_error.unwrap_or_else(|| BluetoothError::ConnectionFailed("Not attempted".into())))
+        Err(last_error.unwrap_or_else(|| Error::ConnectionFailed("Not attempted".into())))
     }
+}
+
+impl Session {
 
     /// Starts a session on an already connected transport. `incoming` carries the raw
     /// bytes the charger sends; `name` and `id` identify it. This is how any link type,
@@ -379,9 +385,7 @@ impl Session {
                 while let Some(chunk) = incoming.next().await {
                     *lock(&last_rx) = Instant::now();
                     for frame in decoder.push(&chunk) {
-                        if debug_frames() {
-                            println!("[DEBUG] RX frame: {:02X?}", frame.bytes());
-                        }
+                        log::trace!("RX frame: {:02X?}", frame.bytes());
                         if let Some(status) = frame.status() {
                             let index = usize::from(status.slot_id - 1);
                             lock(&latest)[index] = Some((status, Instant::now()));
@@ -437,7 +441,7 @@ impl Session {
     }
 
     /// The most recent status of `slot` (1-4) and when it arrived.
-    pub fn latest_status(&self, slot: u8) -> Option<(MC5000SlotStatus, Instant)> {
+    pub fn latest_status(&self, slot: u8) -> Option<(SlotStatus, Instant)> {
         let index = usize::from(slot.checked_sub(1)?);
         lock(&self.inner.latest).get(index).cloned().flatten()
     }
@@ -458,7 +462,7 @@ impl Session {
     }
 
     /// Sends one packet, keeping at least [`REQUEST_GAP`] after the previous write.
-    pub async fn send(&self, packet: &[u8]) -> Result<(), BluetoothError> {
+    pub async fn send(&self, packet: &[u8]) -> Result<(), Error> {
         self.send_sequence(&[packet.to_vec()], REQUEST_GAP).await
     }
 
@@ -467,11 +471,11 @@ impl Session {
         &self,
         packets: &[Vec<u8>],
         gap: Duration,
-    ) -> Result<(), BluetoothError> {
+    ) -> Result<(), Error> {
         let mut last_write = self.inner.io.lock().await;
         for packet in packets {
             if self.is_lost() {
-                return Err(BluetoothError::ConnectionFailed(
+                return Err(Error::ConnectionFailed(
                     "Link to the charger was lost".into(),
                 ));
             }
@@ -489,7 +493,7 @@ impl Session {
                         if timeouts >= MAX_WRITE_TIMEOUTS {
                             self.mark_lost(&format!("{timeouts} writes in a row timed out"));
                         }
-                        Err(BluetoothError::CommunicationError(format!(
+                        Err(Error::CommunicationError(format!(
                             "Write timed out after {} ms",
                             WRITE_TIMEOUT.as_millis()
                         )))
@@ -505,9 +509,9 @@ impl Session {
     }
 
     /// Requests the status of `slot` (1-4). The answer arrives as an event.
-    pub async fn request_status(&self, slot: u8) -> Result<(), BluetoothError> {
+    pub async fn request_status(&self, slot: u8) -> Result<(), Error> {
         let mask = slot_mask(slot)?;
-        self.send(&MC5000Protocol::build_channel_status_command(mask))
+        self.send(&Protocol::build_channel_status_command(mask))
             .await
     }
 
@@ -517,7 +521,7 @@ impl Session {
         &self,
         slot: u8,
         timeout: Duration,
-    ) -> Result<MC5000SlotStatus, BluetoothError> {
+    ) -> Result<SlotStatus, Error> {
         let mut events = self.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -532,7 +536,7 @@ impl Session {
                     }
                     Ok(Ok(SessionEvent::Disconnected))
                     | Ok(Err(broadcast::error::RecvError::Closed)) => {
-                        return Err(BluetoothError::ConnectionFailed(
+                        return Err(Error::ConnectionFailed(
                             "Charger disconnected".into(),
                         ));
                     }
@@ -541,7 +545,7 @@ impl Session {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(BluetoothError::CommunicationError(format!(
+                return Err(Error::CommunicationError(format!(
                     "No status from slot {slot} within {} ms",
                     timeout.as_millis()
                 )));
@@ -556,7 +560,7 @@ impl Session {
         packet: &[u8],
         reply: u8,
         timeout: Duration,
-    ) -> Result<Frame, BluetoothError> {
+    ) -> Result<Frame, Error> {
         let mut events = self.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -570,13 +574,13 @@ impl Session {
                     Ok(Ok(SessionEvent::Frame(_))) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
                     Ok(Ok(SessionEvent::Disconnected))
                     | Ok(Err(broadcast::error::RecvError::Closed)) => {
-                        return Err(BluetoothError::ConnectionFailed("Charger disconnected".into()));
+                        return Err(Error::ConnectionFailed("Charger disconnected".into()));
                     }
                     Err(_) => break,
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(BluetoothError::CommunicationError(format!(
+                return Err(Error::CommunicationError(format!(
                     "No 0x{reply:02X} reply within {} ms",
                     timeout.as_millis()
                 )));
@@ -586,21 +590,21 @@ impl Session {
 
     /// Asks the charger for its device info (0x57): model ID, firmware and hardware
     /// versions. Read only. The charger answers whatever address the request carries.
-    pub async fn device_info(&self, timeout: Duration) -> Result<MC5000DeviceInfo, BluetoothError> {
-        let suffix = MC5000Protocol::name_suffix(self.name()).unwrap_or_default();
-        let packet = MC5000Protocol::build_device_info_command(&suffix);
+    pub async fn device_info(&self, timeout: Duration) -> Result<DeviceInfo, Error> {
+        let suffix = Protocol::name_suffix(self.name()).unwrap_or_default();
+        let packet = Protocol::build_device_info_command(&suffix);
         let frame = self.request(&packet, 0x57, timeout).await?;
-        MC5000DeviceInfo::parse_from_response(frame.bytes())
+        DeviceInfo::parse_from_response(frame.bytes())
     }
 
     /// Reads the charger's system settings (0x96). Read only.
     pub async fn system_settings(
         &self,
         timeout: Duration,
-    ) -> Result<MC5000SystemSettings, BluetoothError> {
-        let packet = MC5000Protocol::build_system_settings_query();
+    ) -> Result<SystemSettings, Error> {
+        let packet = Protocol::build_system_settings_query();
         let frame = self.request(&packet, 0x96, timeout).await?;
-        MC5000SystemSettings::parse_from_response(frame.bytes())
+        SystemSettings::parse_from_response(frame.bytes())
     }
 
     /// Reads the voltage history of `slot` (1-4) for the program in progress (0x98). Read
@@ -611,8 +615,8 @@ impl Session {
         &self,
         slot: u8,
         timeout: Duration,
-    ) -> Result<VoltageHistory, BluetoothError> {
-        let packet = MC5000Protocol::build_voltage_history_command(slot_mask(slot)?);
+    ) -> Result<VoltageHistory, Error> {
+        let packet = Protocol::build_voltage_history_command(slot_mask(slot)?);
         let mut events = self.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         let mut pages: Vec<HistoryPage> = Vec::new();
@@ -637,13 +641,13 @@ impl Session {
                     Ok(Ok(SessionEvent::Frame(_))) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
                     Ok(Ok(SessionEvent::Disconnected))
                     | Ok(Err(broadcast::error::RecvError::Closed)) => {
-                        return Err(BluetoothError::ConnectionFailed("Charger disconnected".into()));
+                        return Err(Error::ConnectionFailed("Charger disconnected".into()));
                     }
                     Err(_) => break,
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(BluetoothError::CommunicationError(format!(
+                return Err(Error::CommunicationError(format!(
                     "No voltage history from slot {slot} within {} ms",
                     timeout.as_millis()
                 )));
@@ -655,7 +659,7 @@ impl Session {
     pub async fn read_all_status(
         &self,
         timeout_per_slot: Duration,
-    ) -> [Option<MC5000SlotStatus>; 4] {
+    ) -> [Option<SlotStatus>; 4] {
         let mut result = [None, None, None, None];
         for (index, entry) in result.iter_mut().enumerate() {
             *entry = self
@@ -725,7 +729,7 @@ impl Session {
         &self,
         configs: &[ChargeConfig],
         keep_running: u8,
-    ) -> Result<(), BluetoothError> {
+    ) -> Result<(), Error> {
         let packets = Self::start_packets(configs, keep_running)?;
         self.send_sequence(&packets, COMMAND_GAP).await
     }
@@ -735,7 +739,7 @@ impl Session {
     /// `FE <slot>` is the stop (official app; captures). A mask with several bits stops
     /// only the lowest slot (live), hence one FE per slot. The `93 00` that follows is
     /// harmless. Other slots keep running.
-    pub async fn stop_slots(&self, stop_mask: u8) -> Result<(), BluetoothError> {
+    pub async fn stop_slots(&self, stop_mask: u8) -> Result<(), Error> {
         self.send_sequence(&Self::stop_packets(stop_mask), COMMAND_GAP)
             .await
     }
@@ -746,8 +750,8 @@ impl Session {
             .filter(|bit| stop_mask & bit != 0)
             .flat_map(|bit| {
                 [
-                    MC5000Protocol::build_fe_query_command_for(bit),
-                    MC5000Protocol::build_start_stop_command(StartStopAction::StopAll),
+                    Protocol::build_fe_query_command_for(bit),
+                    Protocol::build_start_stop_command(StartStopAction::StopAll),
                 ]
             })
             .collect()
@@ -756,20 +760,20 @@ impl Session {
     fn start_packets(
         configs: &[ChargeConfig],
         keep_running: u8,
-    ) -> Result<Vec<Vec<u8>>, BluetoothError> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if configs.is_empty() {
             return Ok(Vec::new());
         }
         let mut packets = Vec::with_capacity(configs.len() * 2 + 1);
         let mut start_mask = keep_running;
         for config in configs {
-            packets.push(MC5000Protocol::build_fe_query_command_for(
+            packets.push(Protocol::build_fe_query_command_for(
                 config.channel_bitmask,
             ));
-            packets.push(MC5000Protocol::build_charge_config_command(config)?);
+            packets.push(Protocol::build_charge_config_command(config)?);
             start_mask |= config.channel_bitmask;
         }
-        packets.push(MC5000Protocol::build_start_stop_command(
+        packets.push(Protocol::build_start_stop_command(
             StartStopAction::ChannelMask(start_mask),
         ));
         Ok(packets)
@@ -817,7 +821,7 @@ impl Session {
     }
 
     /// Stops polling and closes the BLE link.
-    pub async fn disconnect(&self) -> Result<(), BluetoothError> {
+    pub async fn disconnect(&self) -> Result<(), Error> {
         if self.inner.disconnected.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -995,7 +999,7 @@ mod tests {
         fn write<'a>(
             &'a self,
             packet: &'a [u8],
-        ) -> futures::future::BoxFuture<'a, Result<(), BluetoothError>> {
+        ) -> futures::future::BoxFuture<'a, Result<(), Error>> {
             Box::pin(async move {
                 let hang = self
                     .hang_writes
@@ -1043,7 +1047,7 @@ mod tests {
             Box::pin(async { true })
         }
 
-        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), BluetoothError>> {
+        fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -1085,7 +1089,7 @@ mod tests {
         let (session, writes) = fake_session(0);
         session.start_polling(Duration::from_millis(10)); // status frames arrive in between
         let info = session.device_info(Duration::from_secs(2)).await.unwrap();
-        assert_eq!((info.serial_number.as_str(), info.firmware_version.as_str()), ("100214", "1.83"));
+        assert_eq!((info.model_id.as_str(), info.firmware_version.as_str()), ("100214", "1.83"));
         let settings = session.system_settings(Duration::from_secs(2)).await.unwrap();
         assert_eq!(settings.lcd, 1);
         session.stop_polling();

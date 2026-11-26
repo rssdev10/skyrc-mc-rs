@@ -1,0 +1,39 @@
+[package]
+name = "skyrc-mc5000"
+# Released on its own (tags `skyrc-mc5000-v*`), independent of the apps' version.
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unofficial client for the SkyRC MC5000 battery charger over Bluetooth LE: protocol frames, a paced session, slot status and charge history"
+documentation = "https://docs.rs/skyrc-mc5000"
+readme = "README.md"
+keywords = ["skyrc", "mc5000", "charger", "battery", "bluetooth"]
+categories = ["hardware-support"]
+include = ["src/**/*.rs", "examples/**/*.rs", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[features]
+default = ["ble"]
+# Bluetooth LE: scanning, `BleTransport` and `Session::connect`. Without it the crate still
+# has the frames, `Session` on any `Transport`, and the charging rules.
+ble = ["dep:btleplug", "dep:uuid"]
+
+[dependencies]
+# Only what the library uses; applications bring their own runtime.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+thiserror = { workspace = true }
+log = { workspace = true }
+btleplug = { workspace = true, optional = true }
+futures = { workspace = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "status"
+required-features = ["ble"]
+
+[package.metadata.docs.rs]
+all-features = true

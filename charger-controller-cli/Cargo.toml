@@ -5,17 +5,20 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# Released as binaries on GitHub, not on crates.io.
+publish = false
 
 [[bin]]
 name = "charger-cli"
 path = "src/main.rs"
 
 [dependencies]
-mc5000-protocol = { path = "../mc5000-protocol" }
+skyrc-mc5000 = { path = "../skyrc-mc5000", version = "0.1" }
 tokio = { workspace = true }
 chrono = { workspace = true }
 
 # CLI dependencies
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
+log = { workspace = true }
 ctrlc = "3.4"

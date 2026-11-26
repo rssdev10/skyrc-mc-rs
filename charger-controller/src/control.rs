@@ -138,10 +138,10 @@ pub fn emit_error(message: &str) {
 }
 
 /// An eneloop type by name ("lite-aa", "Pro/XX AA", ...) or by its index (0-8).
-fn parse_eneloop(value: &str) -> Option<mc5000_protocol::EneloopType> {
+fn parse_eneloop(value: &str) -> Option<skyrc_mc5000::EneloopType> {
     let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
     let wanted = key(value);
-    mc5000_protocol::EneloopType::ALL
+    skyrc_mc5000::EneloopType::ALL
         .into_iter()
         .find(|t| key(t.name()) == wanted || (*t as u8).to_string() == wanted)
 }
@@ -394,7 +394,7 @@ async fn wait_until(snapshots: &mut watch::Receiver<Snapshot>, condition: &[&str
 mod tests {
     #[test]
     fn eneloop_types_parse_by_name_or_index() {
-        use mc5000_protocol::EneloopType;
+        use skyrc_mc5000::EneloopType;
         assert_eq!(super::parse_eneloop("lite-aa"), Some(EneloopType::LiteAA));
         assert_eq!(super::parse_eneloop("Pro/XX AAA"), Some(EneloopType::ProXXAAA));
         assert_eq!(super::parse_eneloop("8"), Some(EneloopType::StdD));

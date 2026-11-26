@@ -16,17 +16,17 @@
 
 use crate::config_dialog::{ChargeConfig as DialogConfig, ChargeMode};
 use crate::slot::{BatteryChemistry, TaskConfig, TaskType};
-use mc5000_protocol::{ChargeConfig, OperationMode};
+use skyrc_mc5000::{ChargeConfig, OperationMode};
 
 // Detection, Auto's current and Smart's rules are shared with the CLI
-// (`mc5000_protocol::charging`); these wrappers take the GUI's chemistry type.
-pub use mc5000_protocol::charging::{
+// (`skyrc_mc5000::charging`); these wrappers take the GUI's chemistry type.
+pub use skyrc_mc5000::charging::{
     SkipReason, SmartCurrent, SmartRefusal, AUTO_CURRENT_MA, EMPTY_V, LI_ION_MIN_V,
 };
 
 /// Detection for unattended charging: the chemistry, or why the cell is skipped.
 pub fn detect_chemistry(voltage_v: f32) -> Result<BatteryChemistry, SkipReason> {
-    mc5000_protocol::charging::detect_chemistry(voltage_v).map(BatteryChemistry::from_bluetooth_chemistry)
+    skyrc_mc5000::charging::detect_chemistry(voltage_v).map(BatteryChemistry::from_bluetooth_chemistry)
 }
 
 /// Suggestion for the Configure dialog, which the user reviews. Where the voltage is
@@ -46,16 +46,16 @@ pub fn suggest_chemistry(voltage_v: f32) -> BatteryChemistry {
 
 /// Current of Smart's measuring probe.
 pub fn probe_current_ma(chemistry: BatteryChemistry) -> u16 {
-    mc5000_protocol::charging::probe_current_ma(chemistry.to_bluetooth_chemistry())
+    skyrc_mc5000::charging::probe_current_ma(chemistry.to_bluetooth_chemistry())
 }
 
 /// Smart's charge current for a cell with `resistance_mohm`, or why it is not charged
-/// (rules: `mc5000_protocol::charging::smart_current_ma`).
+/// (rules: `skyrc_mc5000::charging::smart_current_ma`).
 pub fn smart_current_ma(
     chemistry: BatteryChemistry,
     resistance_mohm: u16,
 ) -> Result<SmartCurrent, SmartRefusal> {
-    mc5000_protocol::charging::smart_current_ma(chemistry.to_bluetooth_chemistry(), resistance_mohm)
+    skyrc_mc5000::charging::smart_current_ma(chemistry.to_bluetooth_chemistry(), resistance_mohm)
 }
 
 /// Why a cell's measured voltage cannot belong to the chosen chemistry.
@@ -156,7 +156,7 @@ pub fn to_protocol_config(
         charge_resting_min: config.charge_resting_min,
         discharge_resting_min: config.discharge_resting_min,
         cycle_count: config.cycle_count as u8,
-        eneloop_type: mc5000_protocol::EneloopType::from_byte(config.eneloop_type).unwrap_or_default(),
+        eneloop_type: skyrc_mc5000::EneloopType::from_byte(config.eneloop_type).unwrap_or_default(),
     }
 }
 

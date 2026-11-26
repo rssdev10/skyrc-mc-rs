@@ -77,7 +77,7 @@ pub struct ChargeConfig {
     pub cycle_mode: Option<String>,
     pub cycle_count: u16,
 
-    /// eneloop cell type (index of `mc5000_protocol::EneloopType`); ignored for other
+    /// eneloop cell type (index of `skyrc_mc5000::EneloopType`); ignored for other
     /// chemistries. Defaults to 0 (Std AA) for configs saved before it existed.
     #[serde(default)]
     pub eneloop_type: u8,

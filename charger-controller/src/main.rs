@@ -166,6 +166,18 @@ fn script_for(command: &Commands) -> Result<Option<Vec<String>>, String> {
     Ok(Some(script))
 }
 
+/// Logging: `RUST_LOG` as usual; `MC5000_VERBOSE` adds the charger library's debug log and
+/// `MC5000_DEBUG` its trace log (every frame sent and received).
+fn init_logging() {
+    let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var_os("MC5000_DEBUG").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Trace);
+    } else if std::env::var_os("MC5000_VERBOSE").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Debug);
+    }
+    builder.init();
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -181,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[INFO]   RUST_LOG=debug");
     }
 
-    env_logger::init();
+    init_logging();
 
     let script = match &cli.command {
         Some(command) => script_for(command)?,
