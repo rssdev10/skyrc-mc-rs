@@ -737,6 +737,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "env_logger",
+ "log",
  "skyrc-mc5000",
  "tokio",
 ]
@@ -4146,7 +4147,6 @@ dependencies = [
  "log",
  "thiserror 2.0.21",
  "tokio",
- "tokio-stream",
  "uuid",
 ]
 

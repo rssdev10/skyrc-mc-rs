@@ -242,14 +242,26 @@ fn state_name(state: &MC5000SlotState) -> &'static str {
 }
 
 
+/// Logging: `RUST_LOG` as usual; `MC5000_VERBOSE` adds the charger library's debug log and
+/// `MC5000_DEBUG` its trace log (every frame sent and received).
+fn init_logging() {
+    let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var_os("MC5000_DEBUG").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Trace);
+    } else if std::env::var_os("MC5000_VERBOSE").is_some() {
+        builder.filter_module("skyrc_mc5000", log::LevelFilter::Debug);
+    }
+    builder.init();
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
     let cli = Cli::parse();
 
     if cli.verbose {
         std::env::set_var("MC5000_VERBOSE", "1");
         println!("[INFO] Verbose mode enabled");
     }
+    init_logging();
 
     Runtime::new()?.block_on(run_command(cli))
 }

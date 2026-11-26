@@ -300,6 +300,11 @@ MC5000_VERBOSE=1 cargo run -p charger-controller   # verbose logging
 MC5000_DEBUG=1   cargo run -p charger-controller   # raw packet dumps (implies verbose)
 ```
 
+The library itself never prints; it logs through the `log` crate. The apps map
+`MC5000_VERBOSE` to the library's debug level and `MC5000_DEBUG` to its trace level (every
+frame sent and received, as `TX frame` / `RX frame`). `RUST_LOG` works as usual, e.g.
+`RUST_LOG=skyrc_mc5000=trace`.
+
 The GUI keeps `settings.toml`, `profiles.toml` and `slot_configs.toml` in:
 
 - macOS: `~/Library/Application Support/com.mc5000.charger/` (the app's bundle identifier)

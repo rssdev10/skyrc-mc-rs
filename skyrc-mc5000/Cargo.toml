@@ -14,10 +14,13 @@ categories = ["hardware-support"]
 include = ["src/**/*.rs", "examples/**/*.rs", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [dependencies]
-tokio = { workspace = true }
+# Only what the library uses; applications bring their own runtime.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 thiserror = { workspace = true }
 log = { workspace = true }
 btleplug = { workspace = true }
-tokio-stream = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

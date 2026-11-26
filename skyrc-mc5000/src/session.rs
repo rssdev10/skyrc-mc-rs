@@ -280,12 +280,6 @@ fn slot_mask(slot: u8) -> Result<u8, BluetoothError> {
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// Whether to print every received frame (`MC5000_DEBUG` set).
-fn debug_frames() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MC5000_DEBUG").is_some())
-}
-
 /// Latest status per slot (index 0 = slot 1) and when it arrived.
 type LatestStatus = [Option<(MC5000SlotStatus, Instant)>; 4];
 
@@ -379,9 +373,7 @@ impl Session {
                 while let Some(chunk) = incoming.next().await {
                     *lock(&last_rx) = Instant::now();
                     for frame in decoder.push(&chunk) {
-                        if debug_frames() {
-                            println!("[DEBUG] RX frame: {:02X?}", frame.bytes());
-                        }
+                        log::trace!("RX frame: {:02X?}", frame.bytes());
                         if let Some(status) = frame.status() {
                             let index = usize::from(status.slot_id - 1);
                             lock(&latest)[index] = Some((status, Instant::now()));

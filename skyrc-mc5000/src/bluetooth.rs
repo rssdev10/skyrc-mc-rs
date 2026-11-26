@@ -6,33 +6,6 @@ use thiserror::Error;
 use tokio::time;
 use uuid::Uuid;
 
-/// Check if debug output is enabled via MC5000_DEBUG env var
-fn debug_enabled() -> bool {
-    std::env::var("MC5000_DEBUG").is_ok()
-}
-
-/// Check if verbose output is enabled via MC5000_VERBOSE env var
-fn verbose_enabled() -> bool {
-    std::env::var("MC5000_VERBOSE").is_ok() || debug_enabled()
-}
-
-/// Print debug message if debugging is enabled
-macro_rules! debug_print {
-    ($($arg:tt)*) => {
-        if debug_enabled() {
-            println!($($arg)*);
-        }
-    };
-}
-
-/// Print verbose message if verbose mode is enabled
-macro_rules! verbose_print {
-    ($($arg:tt)*) => {
-        if verbose_enabled() {
-            println!("[VERBOSE] {}", format!($($arg)*));
-        }
-    };
-}
 
 #[derive(Debug, Error)]
 pub enum BluetoothError {
@@ -737,8 +710,8 @@ impl MC5000Protocol {
     }
     
     async fn connect_impl(&mut self, peripheral: &Peripheral, send_init: bool) -> Result<(), BluetoothError> {
-        verbose_print!("connect() called for device: {}", peripheral.id());
-        debug_print!("[DEBUG] Starting connection to device: {}", peripheral.id());
+        log::debug!("connect() called for device: {}", peripheral.id());
+        log::trace!("Starting connection to device: {}", peripheral.id());
         
         // Check if already connected (with timeout)
         let is_connected = tokio::time::timeout(
@@ -747,57 +720,57 @@ impl MC5000Protocol {
         ).await.unwrap_or(Ok(false)).unwrap_or(false);
         
         if is_connected {
-            verbose_print!("Already connected, skipping connection attempt");
+            log::debug!("Already connected, skipping connection attempt");
         } else {
             // Connect to device (with timeout)
-            verbose_print!("Initiating BLE connection...");
-            debug_print!("[DEBUG] Attempting BLE connection...");
+            log::debug!("Initiating BLE connection...");
+            log::trace!("Attempting BLE connection...");
             tokio::time::timeout(
                 Duration::from_secs(10),
                 peripheral.connect()
             ).await
                 .map_err(|_| {
-                    verbose_print!("✗ BLE connection timed out");
+                    log::debug!("✗ BLE connection timed out");
                     BluetoothError::ConnectionFailed("Connection timeout".to_string())
                 })?
                 .map_err(|e| {
-                    verbose_print!("✗ BLE connection failed: {}", e);
-                    println!("[ERROR] BLE connection failed: {}", e);
+                    log::debug!("✗ BLE connection failed: {}", e);
+                    log::error!("BLE connection failed: {}", e);
                     BluetoothError::ConnectionFailed(e.to_string())
                 })?;
-            verbose_print!("✓ BLE connection established");
-            debug_print!("[DEBUG] BLE connection successful");
+            log::debug!("✓ BLE connection established");
+            log::trace!("BLE connection successful");
         }
 
         // Wait for connection to establish
-        debug_print!("[DEBUG] Waiting for connection to stabilize...");
+        log::trace!("Waiting for connection to stabilize...");
         time::sleep(Duration::from_millis(1000)).await;
         
         // Verify connection status
         let is_connected = peripheral.is_connected().await.unwrap_or(false);
-        debug_print!("[DEBUG] Connection status verified: {}", is_connected);
+        log::trace!("Connection status verified: {}", is_connected);
         if !is_connected {
             return Err(BluetoothError::ConnectionFailed("Device reports not connected after connection attempt".to_string()));
         }
 
         // Discover services
-        debug_print!("[DEBUG] Starting service discovery...");
+        log::trace!("Starting service discovery...");
         peripheral.discover_services().await
             .map_err(|e| {
-                println!("[ERROR] Service discovery failed: {}", e);
+                log::error!("Service discovery failed: {}", e);
                 BluetoothError::BluetoothError(e.to_string())
             })?;
-        debug_print!("[DEBUG] Service discovery completed");
+        log::trace!("Service discovery completed");
 
         // Debug: print all discovered service UUIDs
         let services = peripheral.services();
-        debug_print!("[DEBUG] Discovered {} services:", services.len());
-        println!("[INFO] Discovered {} services:", services.len());
+        log::trace!("Discovered {} services:", services.len());
+        log::debug!("Discovered {} services:", services.len());
         for (i, s) in services.iter().enumerate() {
-            debug_print!("[DEBUG]   Service {}: {}", i+1, s.uuid);
-            println!("[INFO]   Service {}: {} ({} characteristics)", i+1, s.uuid, s.characteristics.len());
+            log::trace!("  Service {}: {}", i+1, s.uuid);
+            log::debug!("  Service {}: {} ({} characteristics)", i+1, s.uuid, s.characteristics.len());
             for (j, c) in s.characteristics.iter().enumerate() {
-                println!("[INFO]     Char {}: {} - Properties: {:?}", j+1, c.uuid, c.properties);
+                log::debug!("    Char {}: {} - Properties: {:?}", j+1, c.uuid, c.properties);
             }
         }
 
@@ -813,26 +786,26 @@ impl MC5000Protocol {
                 })
             })
             .ok_or_else(|| {
-                println!("[ERROR] No suitable MC5000 service found. Available services:");
+                log::error!("No suitable MC5000 service found. Available services:");
                 for s in &services {
-                    println!("[ERROR]   - {} ({} chars)", s.uuid, s.characteristics.len());
+                    log::error!("  - {} ({} chars)", s.uuid, s.characteristics.len());
                     for c in &s.characteristics {
-                        println!("[ERROR]     - {}: {:?}", c.uuid, c.properties);
+                        log::error!("    - {}: {:?}", c.uuid, c.properties);
                     }
                 }
                 BluetoothError::ServiceNotFound("No service with WRITE characteristics".to_string())
             })?;
         
         let service_uuid = service.uuid;
-        debug_print!("[DEBUG] Selected MC5000 service: {}", service.uuid);
-        println!("[INFO] Using service: {}", service.uuid);
+        log::trace!("Selected MC5000 service: {}", service.uuid);
+        log::debug!("Using service: {}", service.uuid);
 
         // Debug: print all discovered characteristic UUIDs for this service
-        debug_print!("[DEBUG] Discovered {} characteristics for service {}:", service.characteristics.len(), service_uuid);
-        println!("[INFO] Discovered characteristics:");
+        log::trace!("Discovered {} characteristics for service {}:", service.characteristics.len(), service_uuid);
+        log::debug!("Discovered characteristics:");
         for (i, c) in service.characteristics.iter().enumerate() {
-            debug_print!("[DEBUG]   Char {}: {} Properties: {:?}", i+1, c.uuid, c.properties);
-            println!("[INFO]   - {}: Properties: {:?}", c.uuid, c.properties);
+            log::trace!("  Char {}: {} Properties: {:?}", i+1, c.uuid, c.properties);
+            log::debug!("  - {}: Properties: {:?}", c.uuid, c.properties);
         }
 
         // Find characteristics dynamically based on properties
@@ -845,11 +818,11 @@ impl MC5000Protocol {
             .map(|c| c.uuid);
         
         if command_char.is_some() {
-            verbose_print!("✓ Command characteristic found: {:?}", command_char);
-            println!("[INFO] Command characteristic: {:?}", command_char);
+            log::debug!("✓ Command characteristic found: {:?}", command_char);
+            log::debug!("Command characteristic: {:?}", command_char);
         } else {
-            verbose_print!("✗ Command characteristic NOT found");
-            println!("[ERROR] No WRITE characteristic found!");
+            log::debug!("✗ Command characteristic NOT found");
+            log::error!("No WRITE characteristic found!");
         }
 
         let notify_char = service.characteristics
@@ -858,7 +831,7 @@ impl MC5000Protocol {
             .map(|c| c.uuid);
         
         if notify_char.is_some() {
-            println!("[INFO] Notify characteristic: {:?}", notify_char);
+            log::debug!("Notify characteristic: {:?}", notify_char);
         } else {
             // If no NOTIFY, try INDICATE
             let indicate_char = service.characteristics
@@ -866,7 +839,7 @@ impl MC5000Protocol {
                 .find(|c| c.properties.contains(btleplug::api::CharPropFlags::INDICATE))
                 .map(|c| c.uuid);
             if indicate_char.is_some() {
-                println!("[INFO] Indicate characteristic (using instead of notify): {:?}", indicate_char);
+                log::debug!("Indicate characteristic (using instead of notify): {:?}", indicate_char);
             }
         }
 
@@ -875,7 +848,7 @@ impl MC5000Protocol {
 
         // Subscribe to notifications if available
         if let Some(notify_uuid) = notify_char {
-            verbose_print!("Subscribing to notifications on characteristic: {}", notify_uuid);
+            log::debug!("Subscribing to notifications on characteristic: {}", notify_uuid);
             peripheral.subscribe(&btleplug::api::Characteristic {
                 uuid: notify_uuid,
                 service_uuid,
@@ -883,12 +856,12 @@ impl MC5000Protocol {
                 descriptors: BTreeSet::new(),
             }).await
                 .map_err(|e| {
-                    println!("[ERROR] Notification subscription failed: {}", e);
+                    log::error!("Notification subscription failed: {}", e);
                     BluetoothError::BluetoothError(e.to_string())
                 })?;
-            verbose_print!("✓ Successfully subscribed to notifications");
+            log::debug!("✓ Successfully subscribed to notifications");
         } else {
-            verbose_print!("WARNING: No notification characteristic found!");
+            log::debug!("WARNING: No notification characteristic found!");
         }
 
         self.peripheral = Some(peripheral.clone());
@@ -897,11 +870,11 @@ impl MC5000Protocol {
         self.response_char = response_char;
         self.notify_char = notify_char;
 
-        debug_print!("[DEBUG] Connection setup complete:");
-        debug_print!("[DEBUG]   Service UUID: {:?}", service_uuid);
-        debug_print!("[DEBUG]   Command char: {:?}", command_char);
-        debug_print!("[DEBUG]   Response char: {:?}", response_char);
-        debug_print!("[DEBUG]   Notify char: {:?}", notify_char);
+        log::trace!("Connection setup complete:");
+        log::trace!("  Service UUID: {:?}", service_uuid);
+        log::trace!("  Command char: {:?}", command_char);
+        log::trace!("  Response char: {:?}", response_char);
+        log::trace!("  Notify char: {:?}", notify_char);
         
         // Send handshake to activate device communication. It carries the last two
         // address bytes, which the charger also advertises in its name ("#Charger-FF34").
@@ -915,10 +888,10 @@ impl MC5000Protocol {
             .as_deref()
             .and_then(Self::name_suffix)
             .unwrap_or_else(|| "FF34".to_string());
-        verbose_print!("Sending handshake (0x57) with suffix {}...", suffix);
+        log::debug!("Sending handshake (0x57) with suffix {}...", suffix);
         let handshake = Self::build_device_info_command(&suffix);
         self.send_command(&handshake).await?;
-        verbose_print!("✓ Handshake sent, waiting for device response...");
+        log::debug!("✓ Handshake sent, waiting for device response...");
         
         // Wait briefly for device to process handshake
         time::sleep(Duration::from_millis(500)).await;
@@ -926,16 +899,16 @@ impl MC5000Protocol {
         // Send initialization commands matching official app sequence:
         // version(0x74) → settings(0x65); never the general 0xFE query, which stops all slots
         // Without these, the device may ignore control commands like stop.
-        verbose_print!("Sending init sequence (0x74, 0x65)...");
+        log::debug!("Sending init sequence (0x74, 0x65)...");
         if send_init {
             self.send_init_sequence().await?;
-            verbose_print!("✓ Init sequence complete");
+            log::debug!("✓ Init sequence complete");
         } else {
-            verbose_print!("(init sequence skipped — read-only mode)");
+            log::debug!("(init sequence skipped — read-only mode)");
         }
         
         log::info!("Successfully connected to MC5000 device: {}", peripheral.id());
-        debug_print!("[SUCCESS] MC5000 connection established and ready for commands");
+        log::trace!("MC5000 connection established and ready for commands");
         Ok(())
     }
 
@@ -989,28 +962,28 @@ impl MC5000Protocol {
 
     /// Send command to device
     pub async fn send_command(&self, command: &[u8]) -> Result<(), BluetoothError> {
-        verbose_print!("send_command called with {} bytes", command.len());
+        log::debug!("send_command called with {} bytes", command.len());
         
         let peripheral = self.peripheral.as_ref()
             .ok_or_else(|| {
-                verbose_print!("ERROR: Not connected to device");
+                log::debug!("ERROR: Not connected to device");
                 BluetoothError::CommunicationError("Not connected".to_string())
             })?;
-        verbose_print!("Peripheral reference obtained");
+        log::debug!("Peripheral reference obtained");
 
         let command_uuid = self.command_char
             .ok_or_else(|| {
-                verbose_print!("ERROR: Command characteristic not found");
+                log::debug!("ERROR: Command characteristic not found");
                 BluetoothError::CharacteristicNotFound("Command characteristic".to_string())
             })?;
-        verbose_print!("Command characteristic UUID: {}", command_uuid);
+        log::debug!("Command characteristic UUID: {}", command_uuid);
 
         let service_uuid = self.service_uuid
             .ok_or_else(|| {
-                verbose_print!("ERROR: Service UUID not stored");
+                log::debug!("ERROR: Service UUID not stored");
                 BluetoothError::ServiceNotFound("Service UUID not initialized".to_string())
             })?;
-        verbose_print!("Service UUID: {}", service_uuid);
+        log::debug!("Service UUID: {}", service_uuid);
 
         // Use WRITE_WITHOUT_RESPONSE which matches the actual characteristic properties
         let characteristic = btleplug::api::Characteristic {
@@ -1020,36 +993,16 @@ impl MC5000Protocol {
             descriptors: BTreeSet::new(),
         };
 
-        debug_print!("[DEBUG] Outgoing BLE command: {:02X?}", command);
-        if command.len() == 21 && debug_enabled() {
-            debug_print!("  Start byte: 0x{:02X}", command[0]);
-            debug_print!("  Command: 0x{:02X}", command[1]);
-            match command[1] {
-                0x57 => debug_print!("  (Version Info Request)"),
-                0x61 => debug_print!("  (Get Basic Data)"),
-                0x55 => debug_print!("  (Get Channel Data, channel: 0x{:02X})", command[2]),
-                0x05 => debug_print!("  (Start Charging, channel bitmask: 0x{:02X})", command[2]),
-                _ => debug_print!("  (Unknown/Other Command)"),
-            }
-            debug_print!("  Payload: {:02X?}", &command[2..20]);
-            debug_print!("  Checksum: 0x{:02X}", command[20]);
-        } else if command.len() != 21 {
-            debug_print!("[WARN] Outgoing command length is not 21 bytes: {}", command.len());
-        }
-        
-        verbose_print!("Writing {} bytes to characteristic UUID: {}", command.len(), command_uuid);
-        verbose_print!("Command data: {:02X?}", command);
-        debug_print!("[DEBUG] Writing to characteristic...");
+        log::trace!("TX frame: {:02X?}", command);
         
         match peripheral.write(&characteristic, command, WriteType::WithoutResponse).await {
             Ok(_) => {
-                verbose_print!("✓ Write completed successfully");
-                debug_print!("[DEBUG] Write completed");
+                log::trace!("Write completed");
                 log::debug!("Sent command: {:?}", command);
                 Ok(())
             }
             Err(e) => {
-                verbose_print!("✗ Write failed: {}", e);
+                log::debug!("✗ Write failed: {}", e);
                 Err(e.into())
             }
         }
@@ -1057,18 +1010,18 @@ impl MC5000Protocol {
 
     /// Request slot status (fire-and-forget, response comes via notification)
     pub async fn request_slot_status(&self, slot_id: u8) -> Result<(), BluetoothError> {
-        verbose_print!("request_slot_status called for slot {}", slot_id);
+        log::debug!("request_slot_status called for slot {}", slot_id);
         
         // Convert slot ID to channel bitmask (slot 1=0x01, 2=0x02, 3=0x04, 4=0x08)
         let channel_mask = 1u8 << (slot_id - 1);
-        verbose_print!("Channel mask for slot {}: 0x{:02X}", slot_id, channel_mask);
+        log::debug!("Channel mask for slot {}: 0x{:02X}", slot_id, channel_mask);
         
         // Build proper 0x91 status request command
         let status_command = Self::build_channel_status_command(channel_mask);
-        verbose_print!("Status command: {:02X?}", status_command);
+        log::debug!("Status command: {:02X?}", status_command);
         
         self.send_command(&status_command).await?;
-        verbose_print!("Status request sent successfully");
+        log::debug!("Status request sent successfully");
         
         Ok(())
     }
