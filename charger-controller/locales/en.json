@@ -122,5 +122,16 @@
   "charger_error.reversed": "reversed polarity",
   "charger_error.full": "fully charged",
   "charger_error.unknown": "error %{code}",
-  "config.eneloop_type": "eneloop type"
+  "config.eneloop_type": "eneloop type",
+  "btn.set": "Set",
+  "graph.mode_roll": "⟳ Roll",
+  "graph.mode_infinite": "∞ Infinite",
+  "graph.window_s": "Window (s)",
+  "graph.clear": "Clear graph",
+  "graph.recorded": "Recorded: %{span}",
+  "graph.select_slot": "Select a slot to see its graph",
+  "graph.no_data": "No data for this slot yet",
+  "graph.legend_voltage": "Slot %{slot} voltage (V)",
+  "graph.legend_current": "Slot %{slot} current (mA)",
+  "graph.legend_history": "from the charger's memory (voltage only)"
 }

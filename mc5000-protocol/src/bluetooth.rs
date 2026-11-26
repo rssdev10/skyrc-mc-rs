@@ -98,6 +98,8 @@ const CMD_START_STOP: u8 = 0x93;    // Read a slot's stored program (official ap
 const CMD_CHARGE_CONFIG: u8 = 0x94; // Program a slot and start it
 const CMD_SETTINGS: u8 = 0x65;      // Firmware-update-available flag
 const CMD_SYSTEM_SETTINGS: u8 = 0x96; // Read system settings (beeps, LCD, sleep)
+/// Read a slot's voltage history (charge curve). Read only.
+pub const CMD_VOLTAGE_HISTORY: u8 = 0x98;
 
 /// Argument of the 0x93 frame this client sends after its configs and stops.
 ///
@@ -413,6 +415,13 @@ impl MC5000Protocol {
     /// only; the reply parses with [`MC5000SystemSettings::parse_from_response`].
     pub fn build_system_settings_query() -> Vec<u8> {
         Self::build_packet(CMD_SYSTEM_SETTINGS, &[0x04])
+    }
+
+    /// Build the 0x98 voltage-history request for one slot bit (`01`, `02`, `04`, `08`).
+    /// Read only. The reply is up to three [`HistoryPage`]s; a slot with no history does
+    /// not answer.
+    pub fn build_voltage_history_command(slot_bit: u8) -> Vec<u8> {
+        Self::build_packet(CMD_VOLTAGE_HISTORY, &[slot_bit])
     }
 
     /// Build channel status request command (0x91)
@@ -1516,6 +1525,87 @@ impl MC5000DeviceInfo {
     }
 }
 
+/// One frame ("page") of a 0x98 voltage-history reply:
+/// `0f <len> 98 <slot bit> <pages> <page> <interval s> <samples: u16 LE mV>.. <sum>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPage {
+    /// Slot 1-4.
+    pub slot_id: u8,
+    /// Pages in the whole reply, 1-3.
+    pub total_pages: u8,
+    /// This page, from 1.
+    pub page: u8,
+    /// Seconds between samples.
+    pub interval_s: u8,
+    /// Up to 100 smoothed voltage samples, oldest first.
+    pub samples_mv: Vec<u16>,
+}
+
+impl HistoryPage {
+    /// Parses a checksum-validated 0x98 frame.
+    pub fn parse(frame: &[u8]) -> Result<Self, BluetoothError> {
+        let bad = |why: &str| BluetoothError::CommunicationError(format!("0x98 page: {why}"));
+        if frame.len() < 8 || frame[0] != PACKET_START || frame[2] != CMD_VOLTAGE_HISTORY {
+            return Err(bad("not a history frame"));
+        }
+        if usize::from(frame[1]) + 2 != frame.len() || !(frame.len() - 8).is_multiple_of(2) {
+            return Err(bad("length does not match"));
+        }
+        let slot_bit = frame[3];
+        if !slot_bit.is_power_of_two() || slot_bit > 0x08 {
+            return Err(bad("slot mask is not one slot"));
+        }
+        let (total_pages, page) = (frame[4], frame[5]);
+        if total_pages == 0 || page == 0 || page > total_pages {
+            return Err(bad("page numbers out of range"));
+        }
+        Ok(Self {
+            slot_id: slot_bit.trailing_zeros() as u8 + 1,
+            total_pages,
+            page,
+            interval_s: frame[6],
+            samples_mv: frame[7..frame.len() - 1]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| u16::from_le_bytes(b))
+                .collect(),
+        })
+    }
+}
+
+/// A slot's whole voltage history, as the charger keeps it for the program in progress.
+///
+/// Sample `i` (from 0) covers roughly the seconds up to `(i + 1) * interval_s` after the
+/// program started. The charger smooths every sample (0.6 previous + 0.4 new reading) and,
+/// each time its 300-sample buffer fills, averages neighbouring pairs and doubles the
+/// interval, so the history always spans the whole program in fewer than 300 samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoltageHistory {
+    pub slot_id: u8,
+    pub interval_s: u8,
+    pub samples_mv: Vec<u16>,
+}
+
+impl VoltageHistory {
+    /// Joins the pages of one reply; `None` until every page from 1 to the total is there.
+    pub fn from_pages(pages: &[HistoryPage]) -> Option<Self> {
+        let first = pages.iter().find(|p| p.page == 1)?;
+        let mut samples_mv = Vec::new();
+        for n in 1..=first.total_pages {
+            let page = pages.iter().find(|p| {
+                p.page == n && p.slot_id == first.slot_id && p.total_pages == first.total_pages
+            })?;
+            samples_mv.extend_from_slice(&page.samples_mv);
+        }
+        Some(Self {
+            slot_id: first.slot_id,
+            interval_s: first.interval_s,
+            samples_mv,
+        })
+    }
+}
+
 /// The charger's system settings from a 0x96 reply, as raw values: the official app reads
 /// them into its settings screen but their value ranges are not documented. 0x96 only
 /// reads; this client never writes them (0x95).
@@ -2059,5 +2149,70 @@ mod tests {
             MC5000Protocol::build_device_info_command("FF34"),
             hex("0f135700ff343738c1a4000000000000000000005e")
         );
+    }
+    #[test]
+    fn history_request_matches_the_official_app() {
+        assert_eq!(
+            MC5000Protocol::build_voltage_history_command(0x08),
+            vec![0x0F, 0x03, 0x98, 0x08, 0xA0]
+        );
+    }
+
+    #[test]
+    fn history_pages_from_a_live_charger_parse_and_join() {
+        let pages: Vec<HistoryPage> = test_frames::history_slot4()
+            .iter()
+            .map(|f| HistoryPage::parse(f).unwrap())
+            .collect();
+        assert_eq!(pages[0].slot_id, 4);
+        assert_eq!((pages[0].total_pages, pages[0].page, pages[0].interval_s), (3, 1, 4));
+        assert_eq!(&pages[0].samples_mv[..4], &[4145, 4172, 4192, 4198]);
+        assert_eq!(pages.iter().map(|p| p.samples_mv.len()).collect::<Vec<_>>(), [100, 100, 23]);
+
+        let history = VoltageHistory::from_pages(&pages).unwrap();
+        assert_eq!((history.slot_id, history.interval_s, history.samples_mv.len()), (4, 4, 223));
+        // Out of order is fine; a missing page is not.
+        let reversed: Vec<_> = pages.iter().rev().cloned().collect();
+        assert_eq!(VoltageHistory::from_pages(&reversed).as_ref(), Some(&history));
+        assert_eq!(VoltageHistory::from_pages(&pages[..2]), None);
+    }
+
+    #[test]
+    fn history_page_rejects_malformed_frames() {
+        let mut frame = test_frames::history_slot4()[2].clone();
+        frame[3] = 0x0C; // two slots
+        assert!(HistoryPage::parse(&frame).is_err());
+        let mut frame = test_frames::history_slot4()[2].clone();
+        frame[5] = 4; // page 4 of 3
+        assert!(HistoryPage::parse(&frame).is_err());
+        assert!(HistoryPage::parse(&test_frames::history_slot4()[2][..53]).is_err());
+    }
+}
+
+/// Frames received from a real charger, shared by the tests of this crate.
+#[cfg(test)]
+pub(crate) mod test_frames {
+    /// The 0x98 reply for slot 4 (Li-Ion, charging at 4.20 V, 892 s into the program):
+    /// pages of 100, 100 and 23 samples at 4 s. Pages 1 and 2 are rebuilt from their sample
+    /// values and checked against the checksums the charger sent; page 3 is verbatim.
+    pub(crate) fn history_slot4() -> Vec<Vec<u8>> {
+        let page = |n: u8, samples: &[u16], checksum: u8| {
+            let mut f = vec![0x0F, (samples.len() * 2 + 6) as u8, 0x98, 0x08, 0x03, n, 0x04];
+            f.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+            let sum = f[2..].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            assert_eq!(sum, checksum, "page {n} differs from the captured frame");
+            f.push(sum);
+            f
+        };
+        let mut first = vec![4145, 4172, 4192];
+        first.extend([4198; 97]);
+        let third = vec![
+            0x0f, 0x34, 0x98, 0x08, 0x03, 0x03, 0x04, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66,
+            0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66,
+            0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66,
+            0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x66, 0x10, 0x44,
+        ];
+        assert_eq!(page(3, &[4198; 23], 0x44), third);
+        vec![page(1, &first, 0x6b), page(2, &[4198; 100], 0xc1), third]
     }
 }

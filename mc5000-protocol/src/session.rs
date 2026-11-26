@@ -15,8 +15,9 @@
 //! never interleaves with a start/stop sequence.
 
 use crate::bluetooth::{
-    BluetoothError, ChargeConfig, DiscoveredBluetoothDevice, MC5000DeviceInfo, MC5000Protocol,
-    MC5000SlotStatus, MC5000SystemSettings, StartStopAction,
+    BluetoothError, ChargeConfig, DiscoveredBluetoothDevice, HistoryPage, MC5000DeviceInfo,
+    MC5000Protocol, MC5000SlotStatus, MC5000SystemSettings, StartStopAction, VoltageHistory,
+    CMD_VOLTAGE_HISTORY,
 };
 use crate::transport::{BleTransport, IncomingBytes, Transport};
 use btleplug::api::Peripheral as _;
@@ -47,10 +48,17 @@ pub const RESCAN_TIMEOUT_SECS: u64 = 5;
 /// Connection attempts before giving up. The link is torn down between attempts.
 pub const CONNECT_ATTEMPTS: u32 = 2;
 
+/// [`Session::read_history`] asks again when no page arrives for this long. The charger
+/// sends pages about 100 ms apart.
+pub const HISTORY_RETRY: Duration = Duration::from_millis(800);
+
 const PACKET_START: u8 = 0x0F;
 const CMD_CHANNEL_STATUS: u8 = 0x91;
-/// Longest frame accepted from the charger. Longer length bytes are treated as noise.
+/// Longest frame accepted from the charger. Longer length bytes are treated as noise,
+/// except for 0x98 history pages, which carry up to 100 samples.
 const MAX_FRAME_LEN: usize = 64;
+/// Longest 0x98 history page: 100 samples (200 bytes) + 8.
+const MAX_HISTORY_FRAME_LEN: usize = 208;
 
 /// How a session connects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,12 +131,13 @@ impl FrameDecoder {
                     break;
                 }
             }
-            let Some(total) = Self::frame_len(&self.buf) else {
-                if self.buf.len() >= 2 {
+            let total = match Self::frame_len(&self.buf) {
+                FrameLen::Known(total) => total,
+                FrameLen::NeedMore => break,
+                FrameLen::Implausible => {
                     self.buf.drain(..1); // implausible length byte: resync
                     continue;
                 }
-                break;
             };
             if self.buf.len() < total {
                 break; // wait for the rest of the frame
@@ -142,16 +151,30 @@ impl FrameDecoder {
         frames
     }
 
-    /// Total frame length from the length byte, if plausible.
-    fn frame_len(buf: &[u8]) -> Option<usize> {
-        let total = *buf.get(1)? as usize + 2;
-        (4..=MAX_FRAME_LEN).contains(&total).then_some(total)
+    /// Total frame length from the length byte, if plausible. A length only a history
+    /// page can have is accepted once the command byte shows it is one.
+    fn frame_len(buf: &[u8]) -> FrameLen {
+        let Some(&len) = buf.get(1) else {
+            return FrameLen::NeedMore;
+        };
+        let total = usize::from(len) + 2;
+        if (4..=MAX_FRAME_LEN).contains(&total) {
+            return FrameLen::Known(total);
+        }
+        if total > MAX_HISTORY_FRAME_LEN {
+            return FrameLen::Implausible;
+        }
+        match buf.get(2) {
+            None => FrameLen::NeedMore,
+            Some(&CMD_VOLTAGE_HISTORY) => FrameLen::Known(total),
+            Some(_) => FrameLen::Implausible,
+        }
     }
 
     fn starts_with_frame(buf: &[u8]) -> bool {
         buf.first() == Some(&PACKET_START)
-            && Self::frame_len(buf)
-                .is_some_and(|total| buf.len() >= total && Self::checksum_ok(&buf[..total]))
+            && matches!(Self::frame_len(buf),
+                FrameLen::Known(total) if buf.len() >= total && Self::checksum_ok(&buf[..total]))
     }
 
     /// Checksum: sum of command and data bytes, modulo 256.
@@ -159,6 +182,14 @@ impl FrameDecoder {
         let (body, sum) = frame[2..].split_at(frame.len() - 3);
         body.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)) == sum[0]
     }
+}
+
+/// What a frame's length byte says.
+enum FrameLen {
+    Known(usize),
+    /// Not enough bytes yet to judge the length.
+    NeedMore,
+    Implausible,
 }
 
 /// Something that happened on the connection.
@@ -572,6 +603,54 @@ impl Session {
         MC5000SystemSettings::parse_from_response(frame.bytes())
     }
 
+    /// Reads the voltage history of `slot` (1-4) for the program in progress (0x98). Read
+    /// only. The charger sends up to three pages about 100 ms apart; the request is sent
+    /// again when nothing arrives for [`HISTORY_RETRY`], which restarts the reply. A slot
+    /// with no history never answers, so that ends in a timeout error.
+    pub async fn read_history(
+        &self,
+        slot: u8,
+        timeout: Duration,
+    ) -> Result<VoltageHistory, BluetoothError> {
+        let packet = MC5000Protocol::build_voltage_history_command(slot_mask(slot)?);
+        let mut events = self.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut pages: Vec<HistoryPage> = Vec::new();
+        loop {
+            self.send(&packet).await?;
+            loop {
+                let retry_at = deadline.min(tokio::time::Instant::now() + HISTORY_RETRY);
+                match tokio::time::timeout_at(retry_at, events.recv()).await {
+                    Ok(Ok(SessionEvent::Frame(frame))) if frame.command() == CMD_VOLTAGE_HISTORY => {
+                        let Ok(page) = HistoryPage::parse(frame.bytes()) else { continue };
+                        if page.slot_id != slot {
+                            continue;
+                        }
+                        if page.page == 1 {
+                            pages.clear(); // a new reply (after a resend) starts over
+                        }
+                        pages.push(page);
+                        if let Some(history) = VoltageHistory::from_pages(&pages) {
+                            return Ok(history);
+                        }
+                    }
+                    Ok(Ok(SessionEvent::Frame(_))) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                    Ok(Ok(SessionEvent::Disconnected))
+                    | Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        return Err(BluetoothError::ConnectionFailed("Charger disconnected".into()));
+                    }
+                    Err(_) => break,
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(BluetoothError::CommunicationError(format!(
+                    "No voltage history from slot {slot} within {} ms",
+                    timeout.as_millis()
+                )));
+            }
+        }
+    }
+
     /// Reads all four slots, one after another. Slots that never answer are `None`.
     pub async fn read_all_status(
         &self,
@@ -930,6 +1009,21 @@ mod tests {
                     let reply = if packet[2] == 0x57 { &INFO_REPLY[..] } else { &SETTINGS_REPLY[..] };
                     let _ = replies.send(reply.to_vec());
                 }
+                if packet[2] == 0x98 && packet[3] == 0x08 {
+                    let dropped = self
+                        .drop_requests
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .is_ok();
+                    if let (false, Some(replies)) = (dropped, &self.replies) {
+                        // Real pages, split at the 20-byte BLE limit, a status frame between.
+                        for page in crate::bluetooth::test_frames::history_slot4() {
+                            for chunk in page.chunks(20) {
+                                let _ = replies.send(chunk.to_vec());
+                            }
+                            let _ = replies.send(status_frame(0x01));
+                        }
+                    }
+                }
                 if packet[2] == 0x91 {
                     let dropped = self
                         .drop_requests
@@ -998,6 +1092,57 @@ mod tests {
         let sent = commands(&writes);
         assert!(sent.contains(&0x57) && sent.contains(&0x96));
         assert!(!sent.iter().any(|c| matches!(c, 0x94 | 0xFE | 0x93 | 0x74 | 0x65)), "read only: {sent:02X?}");
+    }
+
+    #[test]
+    fn decodes_history_pages_longer_than_other_frames() {
+        let pages = crate::bluetooth::test_frames::history_slot4();
+        let mut decoder = FrameDecoder::default();
+        let mut frames = Vec::new();
+        for chunk in pages[0].chunks(20) {
+            frames.extend(decoder.push(chunk)); // 208 bytes in 20-byte notifications
+        }
+        frames.extend(decoder.push(&pages[2])); // whole, in one notification
+        assert_eq!(frames, vec![Frame(pages[0].clone()), Frame(pages[2].clone())]);
+    }
+
+    #[test]
+    fn a_long_length_byte_is_noise_for_other_commands() {
+        // `0F CE 91`: a length only a history page may have, on a status command.
+        let mut chunk = vec![0x0F, 0xCE, 0x91, 0x00];
+        chunk.extend_from_slice(&VERSION_REPLY);
+        assert_eq!(FrameDecoder::default().push(&chunk), vec![Frame(VERSION_REPLY.to_vec())]);
+        // The command byte may arrive in the next notification.
+        let mut decoder = FrameDecoder::default();
+        assert!(decoder.push(&[0x0F, 0xCE]).is_empty());
+        assert_eq!(decoder.push(&chunk[2..]), vec![Frame(VERSION_REPLY.to_vec())]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn history_is_read_across_pages_while_polling() {
+        let (session, writes) = fake_session(0);
+        session.start_polling(Duration::from_millis(10));
+        let history = session.read_history(4, Duration::from_secs(2)).await.unwrap();
+        session.stop_polling();
+        assert_eq!((history.slot_id, history.interval_s, history.samples_mv.len()), (4, 4, 223));
+        assert_eq!(history.samples_mv[0], 4145);
+        let sent = commands(&writes);
+        assert!(!sent.iter().any(|c| matches!(c, 0x94 | 0xFE | 0x93)), "read only: {sent:02X?}");
+    }
+
+    #[tokio::test]
+    async fn history_is_asked_again_when_the_first_request_is_lost() {
+        let (session, writes) = fake_session(1);
+        let history = session.read_history(4, Duration::from_secs(3)).await.unwrap();
+        assert_eq!(history.samples_mv.len(), 223);
+        assert_eq!(commands(&writes), vec![0x98, 0x98]);
+    }
+
+    #[tokio::test]
+    async fn a_slot_without_history_times_out() {
+        let (session, _) = fake_session(0);
+        assert!(session.read_history(1, Duration::from_millis(500)).await.is_err());
+        assert!(session.read_history(5, Duration::from_millis(500)).await.is_err());
     }
 
     #[tokio::test]

@@ -122,5 +122,16 @@
   "charger_error.reversed": "极性接反",
   "charger_error.full": "已充满",
   "charger_error.unknown": "错误 %{code}",
-  "config.eneloop_type": "eneloop 类型"
+  "config.eneloop_type": "eneloop 类型",
+  "btn.set": "应用",
+  "graph.mode_roll": "⟳ 滚动",
+  "graph.mode_infinite": "∞ 全部",
+  "graph.window_s": "窗口 (秒)",
+  "graph.clear": "清除图表",
+  "graph.recorded": "已记录: %{span}",
+  "graph.select_slot": "选择一个槽位以查看其图表",
+  "graph.no_data": "该槽位暂无数据",
+  "graph.legend_voltage": "槽位 %{slot} 电压 (V)",
+  "graph.legend_current": "槽位 %{slot} 电流 (mA)",
+  "graph.legend_history": "来自充电器内存（仅电压）"
 }

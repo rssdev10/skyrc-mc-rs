@@ -122,5 +122,16 @@
   "charger_error.reversed": "polaridad invertida",
   "charger_error.full": "carga completa",
   "charger_error.unknown": "error %{code}",
-  "config.eneloop_type": "Tipo de eneloop"
+  "config.eneloop_type": "Tipo de eneloop",
+  "btn.set": "Aplicar",
+  "graph.mode_roll": "⟳ Desplazar",
+  "graph.mode_infinite": "∞ Todo",
+  "graph.window_s": "Ventana (s)",
+  "graph.clear": "Limpiar gráfico",
+  "graph.recorded": "Registrado: %{span}",
+  "graph.select_slot": "Seleccione una ranura para ver su gráfico",
+  "graph.no_data": "Aún no hay datos de esta ranura",
+  "graph.legend_voltage": "Ranura %{slot} tensión (V)",
+  "graph.legend_current": "Ranura %{slot} corriente (mA)",
+  "graph.legend_history": "de la memoria del cargador (solo tensión)"
 }

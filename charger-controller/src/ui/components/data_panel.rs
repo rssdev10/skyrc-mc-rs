@@ -88,7 +88,7 @@ pub fn view(data_logger: &DataLogger, show_detailed_stats: bool) -> Element<'_, 
                     text(m.timestamp.format("%H:%M:%S.%3f").to_string()).size(10).width(Length::Fixed(100.0)),
                     text(format!("{} {}", t!("label.slot"), m.slot_id.0 + 1)).size(10).width(Length::Fixed(50.0)),
                     text(format!("{:.3}V", m.voltage)).size(10).width(Length::Fixed(60.0)),
-                    text(format!("{:.0}mA", m.current * 1000.0)).size(10).width(Length::Fixed(60.0)),
+                    text(m.current.map_or_else(|| "—".to_string(), |ma| format!("{ma:.0}mA"))).size(10).width(Length::Fixed(60.0)),
                     text(&m.state).size(10).width(Length::Fixed(80.0)),
                 ]
                 .spacing(5)

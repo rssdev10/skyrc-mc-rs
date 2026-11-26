@@ -6,8 +6,9 @@ use std::hash::{Hash, Hasher};
 use mc5000_protocol::{
     MC5000SlotState as BtSlotState, ChargeConfig, OperationMode,
     BluetoothError, ConnectMode, DiscoveredBluetoothDevice,
-    MC5000SlotStatus, Session, SessionEvent,
+    MC5000SlotStatus, Session, SessionEvent, VoltageHistory,
 };
+use chrono::{DateTime, Utc};
 
 /// How often the shared session polls all four slots while connected.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -111,7 +112,35 @@ pub enum AppMessage {
     SettingsOpenRepo,
     /// One line from the control channel (headless runs and agents).
     Control(String),
+    /// The charger's voltage history (0x98) of a slot's program, requested by
+    /// [`ChargerApp::history_task`].
+    HistoryReceived(HistoryRequest, Result<VoltageHistory, String>),
+    /// Graph: switch between Roll and Infinite.
+    GraphToggleMode,
+    /// Graph: the Roll window field changed.
+    GraphWindowInput(String),
+    /// Graph: apply the Roll window field.
+    GraphWindowApply,
+    /// Graph: hide what is recorded so far (kept for export).
+    GraphClear,
 }
+
+/// What a voltage-history request was for: the slot (0-3), the program it belongs to and
+/// its run time when asked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HistoryRequest {
+    pub slot: usize,
+    pub program_start: DateTime<Utc>,
+    pub elapsed_s: u32,
+}
+
+/// The app reads the charger's history only when its own data of the program has a hole
+/// longer than this: it connected late, or the link was down for a while.
+const HISTORY_HOLE_S: i64 = 15;
+/// How long a history read may take (up to three pages, resent once if lost).
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(4);
+/// A program-start estimate further than this from the previous one is a new program.
+const PROGRAM_START_TOLERANCE_S: i64 = 5;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -176,6 +205,18 @@ pub struct ChargerApp {
     reported_modes: [Option<String>; 4],
     /// Control channel and the snapshots it waits on, when enabled.
     control: Option<Control>,
+    /// When each slot's current or last program started (now minus its run time, while
+    /// it runs). Kept after the program ends: the charger keeps its history.
+    program_starts: [Option<DateTime<Utc>>; 4],
+    /// The program (and connection) whose history need each slot has checked, so it is
+    /// checked once per connection and program.
+    history_checked: [Option<(u64, DateTime<Utc>)>; 4],
+    /// Samples the last history backfill added per slot (for the control snapshot).
+    history_samples: [usize; 4],
+    /// Graph Roll-window field as typed.
+    graph_window_input: String,
+    /// Set by the graph's Clear: older samples are not drawn.
+    graph_epoch: Option<DateTime<Utc>>,
 }
 
 struct Control {
@@ -208,6 +249,21 @@ struct Restart {
 /// How long a slot counts as waiting for the charger to confirm a start or stop (the same
 /// fallback after which the view re-enables its buttons).
 const COMMAND_CONFIRM_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether `samples` (one slot's, in time order) leave part of `from..to` uncovered for
+/// longer than [`HISTORY_HOLE_S`].
+fn has_hole(samples: &[MeasurementPoint], from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+    let hole = chrono::Duration::seconds(HISTORY_HOLE_S);
+    let start = samples.partition_point(|m| m.timestamp < from);
+    let mut covered_until = from;
+    for m in samples[start..].iter().take_while(|m| m.timestamp <= to) {
+        if m.timestamp - covered_until > hole {
+            return true;
+        }
+        covered_until = m.timestamp;
+    }
+    to - covered_until > hole
+}
 
 /// What a background command did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +378,7 @@ impl ChargerApp {
             arr
         };
 
+        let graph_window_input = settings.graph_window_s.to_string();
         let app = ChargerApp {
             devices: Vec::new(),
             session: None,
@@ -366,6 +423,11 @@ impl ChargerApp {
                 options,
                 snapshots: tokio::sync::watch::channel(crate::control::Snapshot::default()).0,
             }),
+            program_starts: [None; 4],
+            history_checked: [None; 4],
+            history_samples: [0; 4],
+            graph_window_input,
+            graph_epoch: None,
         };
 
         if verbose {
@@ -703,6 +765,95 @@ impl ChargerApp {
     }
 
     /// What the control channel reports and waits on.
+    /// Notes when the slot's program started and, once per connection and program, asks
+    /// the charger for its voltage history if the app's own data of the program has a hole:
+    /// the app connected after the start, or the link was down. Read only.
+    fn history_task(&mut self, slot: usize, status: &MC5000SlotStatus) -> Task<AppMessage> {
+        let now = Utc::now();
+        if status.is_running() {
+            let estimate = now - chrono::Duration::seconds(i64::from(status.elapsed_seconds));
+            let same_program = self.program_starts[slot].is_some_and(|start| {
+                (start - estimate).num_seconds().abs() <= PROGRAM_START_TOLERANCE_S
+            });
+            if !same_program {
+                self.program_starts[slot] = Some(estimate);
+            }
+        }
+        let (Some(session), Some(program_start)) = (&self.session, self.program_starts[slot]) else {
+            return Task::none();
+        };
+        // The charger keeps the history after the program ends, and a finished program's
+        // start is still known if the app saw it run. It runs again from 0 after a restart.
+        if status.elapsed_seconds == 0 || status.voltage_mv == 0 {
+            return Task::none();
+        }
+        let key = (session.generation(), program_start);
+        if self.history_checked[slot] == Some(key) {
+            return Task::none();
+        }
+        self.history_checked[slot] = Some(key);
+        if !has_hole(
+            self.data_logger.get_measurements_for_slot(SlotId(slot)),
+            program_start,
+            now.min(program_start + chrono::Duration::seconds(i64::from(status.elapsed_seconds))),
+        ) {
+            return Task::none();
+        }
+        let request = HistoryRequest { slot, program_start, elapsed_s: status.elapsed_seconds };
+        let session = session.clone();
+        let slot_id = slot as u8 + 1;
+        Task::perform(
+            async move { session.read_history(slot_id, HISTORY_TIMEOUT).await.map_err(|e| e.to_string()) },
+            move |result| AppMessage::HistoryReceived(request, result),
+        )
+    }
+
+    /// Adds a history the charger sent to the slot's data, if it fits the program it was
+    /// asked for.
+    fn backfill_history(&mut self, request: HistoryRequest, result: Result<VoltageHistory, String>) {
+        let slot = request.slot;
+        let history = match result {
+            Ok(history) => history,
+            Err(e) => {
+                log::info!("Slot {}: no voltage history from the charger: {e}", slot + 1);
+                return;
+            }
+        };
+        let span = history.samples_mv.len() as i64 * i64::from(history.interval_s);
+        let slack = 2 * i64::from(history.interval_s) + 30;
+        if usize::from(history.slot_id) != slot + 1 || (span - i64::from(request.elapsed_s)).abs() > slack {
+            log::warn!(
+                "Slot {}: history of {span} s does not fit the program's {} s; not used",
+                slot + 1,
+                request.elapsed_s
+            );
+            return;
+        }
+        let added = self.data_logger.backfill_history(
+            SlotId(slot),
+            request.program_start,
+            history.interval_s,
+            &history.samples_mv,
+        );
+        self.history_samples[slot] = added;
+        log::info!(
+            "Slot {}: {added} of {} history samples ({} s apart) filled in",
+            slot + 1,
+            history.samples_mv.len(),
+            history.interval_s
+        );
+        self.emit(
+            "event",
+            serde_json::json!({
+                "event": "history",
+                "slot": slot + 1,
+                "samples": history.samples_mv.len(),
+                "interval_s": history.interval_s,
+                "added": added,
+            }),
+        );
+    }
+
     fn snapshot(&self) -> crate::control::Snapshot {
         use crate::control::{Snapshot, SlotSnapshot};
         let connection = match &self.connection_status {
@@ -763,6 +914,7 @@ impl ChargerApp {
                         _ => None,
                     },
                     notice: self.slot_notices[i].clone(),
+                    history_samples: self.history_samples[i],
                 })
                 .collect(),
         }
@@ -1035,6 +1187,8 @@ impl ChargerApp {
                             status.elapsed_seconds
                         );
                         self.data_logger.add_measurement(measurement);
+                        let history = self.history_task(slot_idx, &status);
+                        command_task = Task::batch([command_task, history]);
                     }
                 }
                 command_task
@@ -1908,7 +2062,7 @@ impl ChargerApp {
             AppMessage::FileSelectedAllSamples(path) => {
                 if let Some(path) = path {
                     let measurements = self.data_logger.get_all_measurements();
-                    if let Err(e) = self.csv_exporter.export_to_file(&path, measurements) {
+                    if let Err(e) = self.csv_exporter.export_to_file(&path, measurements.iter().copied()) {
                         log::error!("Failed to export all samples: {}", e);
                         eprintln!("Failed to export all samples: {}", e);
                     } else {
@@ -1923,8 +2077,46 @@ impl ChargerApp {
                 Task::none()
             }
             
+            AppMessage::HistoryReceived(request, result) => {
+                self.backfill_history(request, result);
+                Task::none()
+            }
+
+            AppMessage::GraphToggleMode => {
+                use crate::settings::GraphTimeMode;
+                self.settings.graph_time_mode = match self.settings.graph_time_mode {
+                    GraphTimeMode::Roll => GraphTimeMode::Infinite,
+                    GraphTimeMode::Infinite => GraphTimeMode::Roll,
+                };
+                let _ = crate::settings::save(&self.settings);
+                Task::none()
+            }
+
+            AppMessage::GraphWindowInput(input) => {
+                self.graph_window_input = input;
+                Task::none()
+            }
+
+            AppMessage::GraphWindowApply => {
+                match self.graph_window_input.trim().parse::<u32>() {
+                    Ok(seconds) if seconds >= 10 => {
+                        self.settings.graph_window_s = seconds;
+                        let _ = crate::settings::save(&self.settings);
+                    }
+                    _ => {}
+                }
+                self.graph_window_input = self.settings.graph_window_s.to_string();
+                Task::none()
+            }
+
+            AppMessage::GraphClear => {
+                self.graph_epoch = Some(Utc::now());
+                Task::none()
+            }
+
             AppMessage::ClearData => {
                 self.data_logger.clear();
+                self.graph_epoch = None;
                 Task::none()
             }
             
@@ -2001,6 +2193,12 @@ impl ChargerApp {
             self.buttons_locked(),
             &self.slot_command_pending,
             &self.slot_notices,
+            ui::components::graph_panel::GraphOptions {
+                mode: self.settings.graph_time_mode,
+                window_s: self.settings.graph_window_s,
+                window_input: &self.graph_window_input,
+                epoch: self.graph_epoch,
+            },
         )
     }
 
@@ -2668,5 +2866,84 @@ mod tests {
             super::map_bt_state(&BtSlotState::Error),
             SlotState::Error("Error".to_string())
         );
+    }
+
+    #[test]
+    fn a_hole_in_the_programs_live_data_is_found() {
+        let start = chrono::Utc::now() - chrono::Duration::seconds(600);
+        let point = |s: i64| MeasurementPoint {
+            timestamp: start + chrono::Duration::seconds(s),
+            ..MeasurementPoint::new(SlotId(0), 4.2, 500.0)
+        };
+        let end = start + chrono::Duration::seconds(60);
+        let every_second: Vec<_> = (0..=60).map(point).collect();
+        assert!(!super::has_hole(&every_second, start, end), "watched from the start");
+        let late: Vec<_> = (30..=60).map(point).collect();
+        assert!(super::has_hole(&late, start, end), "connected 30 s late");
+        let gap: Vec<_> = (0..=20).chain(40..=60).map(point).collect();
+        assert!(super::has_hole(&gap, start, end), "20 s without data");
+        let short_gap: Vec<_> = (0..=20).chain(30..=60).map(point).collect();
+        assert!(!super::has_hole(&short_gap, start, end), "10 s is not a hole");
+        assert!(super::has_hole(&[], start, end));
+    }
+
+    fn running(slot_id: u8, elapsed_seconds: u32) -> MC5000SlotStatus {
+        MC5000SlotStatus { elapsed_seconds, ..status(slot_id, 4198, 500) }
+    }
+
+    #[tokio::test]
+    async fn history_is_requested_once_per_connection_and_program() {
+        let mut app = create_test_app();
+        app.session = Some(test_session());
+        app.connection_status = ConnectionStatus::Connected;
+        // Connected 10 minutes into a program: the start is a hole.
+        let _ = app.update(AppMessage::StatusReceived(running(4, 600)));
+        let first = app.history_checked[3];
+        assert!(first.is_some());
+        let start = app.program_starts[3].unwrap();
+        assert!(((chrono::Utc::now() - start).num_seconds() - 600).abs() <= 1);
+        // Further statuses of the same program do not ask again.
+        let _ = app.update(AppMessage::StatusReceived(running(4, 601)));
+        assert_eq!(app.history_checked[3], first);
+        assert_eq!(app.program_starts[3], Some(start));
+        // A new program does.
+        let _ = app.update(AppMessage::StatusReceived(running(4, 3)));
+        assert_ne!(app.program_starts[3], Some(start));
+    }
+
+    #[test]
+    fn history_that_does_not_fit_the_program_is_not_used() {
+        let mut app = create_test_app();
+        let request = super::HistoryRequest {
+            slot: 3,
+            program_start: chrono::Utc::now() - chrono::Duration::seconds(892),
+            elapsed_s: 892,
+        };
+        let history = |samples: usize| mc5000_protocol::VoltageHistory {
+            slot_id: 4,
+            interval_s: 4,
+            samples_mv: vec![4198; samples],
+        };
+        let _ = app.update(AppMessage::HistoryReceived(request, Ok(history(50))));
+        assert_eq!(app.data_logger.len(), 0, "200 s of history for an 892 s program");
+        let _ = app.update(AppMessage::HistoryReceived(request, Ok(history(223))));
+        assert_eq!(app.data_logger.len(), 223);
+        assert_eq!(app.history_samples[3], 223);
+        let _ = app.update(AppMessage::HistoryReceived(request, Err("timeout".into())));
+        assert_eq!(app.data_logger.len(), 223);
+    }
+
+    #[test]
+    fn graph_window_accepts_only_sensible_values() {
+        let mut app = create_test_app();
+        let before = app.settings.graph_window_s;
+        let _ = app.update(AppMessage::GraphWindowInput("abc".into()));
+        let _ = app.update(AppMessage::GraphWindowApply);
+        assert_eq!(app.settings.graph_window_s, before);
+        assert_eq!(app.graph_window_input, before.to_string());
+        let _ = app.update(AppMessage::GraphClear);
+        assert!(app.graph_epoch.is_some());
+        let _ = app.update(AppMessage::ClearData);
+        assert!(app.graph_epoch.is_none());
     }
 }
