@@ -16,3 +16,13 @@ First release under this name. Earlier versions were attached to the app release
   info (0x57), system settings (0x96) and voltage history (0x98).
 - All ten chemistries and their mode families; eneloop cell types.
 - `charging`: chemistry detection and Auto/Smart current rules.
+
+Compared with `mc5000-protocol` 0.3.1:
+
+- Renamed: `MC5000SlotStatus`, `MC5000SlotState`, `MC5000DeviceInfo`,
+  `MC5000SystemSettings`, `MC5000Protocol` are now `SlotStatus`, `SlotState`, `DeviceInfo`,
+  `SystemSettings`, `Protocol`; `BluetoothError` is `Error`; `DiscoveredBluetoothDevice` is
+  `DiscoveredCharger`; `DeviceInfo::serial_number` is `model_id`.
+- Bluetooth LE is the default feature `ble`; without it the crate needs no Bluetooth stack.
+- The crate no longer prints; it logs through `log` (sent and received frames at trace).
+- It requires only tokio's `rt`, `sync` and `time` features.

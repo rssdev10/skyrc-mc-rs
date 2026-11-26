@@ -12,17 +12,28 @@
 //!   frame reassembly, command sequences)
 //! - [`Transport`]: the link a session runs on. Bluetooth LE today; a wired (serial)
 //!   placeholder is ready for when that protocol is known.
+//!
+//! ## Cargo features
+//!
+//! - `ble` (default): Bluetooth LE through `btleplug`: [`Session::scan`],
+//!   [`Session::connect`] and `BleTransport`. Without it the crate keeps the frame builders
+//!   and parsers, [`Session`] on any [`Transport`] and the [`charging`] rules, and needs no
+//!   Bluetooth stack to build.
 
 pub mod bluetooth;
 pub mod charging;
 pub mod session;
 pub mod transport;
 
+#[cfg(feature = "ble")]
+pub use bluetooth::DiscoveredCharger;
+#[cfg(feature = "ble")]
+pub use transport::BleTransport;
 pub use bluetooth::{
-    Error, DiscoveredCharger, Protocol,
+    Error, Protocol,
     BatteryChemistry, ChargeConfig, EneloopType, OperationMode,
     HistoryPage, DeviceInfo, SlotStatus, SlotState, SystemSettings,
     StartStopAction, VoltageHistory,
 };
 pub use session::{ConnectMode, Frame, FrameDecoder, Session, SessionEvent};
-pub use transport::{BleTransport, IncomingBytes, SerialTransport, Transport};
+pub use transport::{IncomingBytes, SerialTransport, Transport};

@@ -20,6 +20,9 @@ on its own version line (see [skyrc-mc5000/README.md](skyrc-mc5000/README.md) an
 skyrc-mc5000 = "0.1"
 ```
 
+Its `ble` feature (default) brings Bluetooth LE; `default-features = false` builds the frames,
+`Session` and charging rules without a Bluetooth stack.
+
 The apps in this workspace depend on it by path (`{ path = "../skyrc-mc5000", version = "0.1" }`),
 so they always build against the library in the same commit.
 

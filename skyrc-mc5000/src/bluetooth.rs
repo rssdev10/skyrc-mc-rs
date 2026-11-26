@@ -1,8 +1,14 @@
+#[cfg(feature = "ble")]
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
+#[cfg(feature = "ble")]
 use btleplug::platform::{Manager, Peripheral};
+#[cfg(feature = "ble")]
 use std::collections::BTreeSet;
+#[cfg(feature = "ble")]
 use std::time::Duration;
+#[cfg(feature = "ble")]
 use tokio::time;
+#[cfg(feature = "ble")]
 use uuid::Uuid;
 
 
@@ -24,6 +30,7 @@ pub enum Error {
     Error(String),
 }
 
+#[cfg(feature = "ble")]
 impl From<btleplug::Error> for Error {
     fn from(error: btleplug::Error) -> Self {
         Error::Error(error.to_string())
@@ -31,6 +38,8 @@ impl From<btleplug::Error> for Error {
 }
 
 
+/// A charger found by a Bluetooth scan.
+#[cfg(feature = "ble")]
 #[derive(Debug, Clone)]
 pub struct DiscoveredCharger {
     pub id: String,
@@ -41,12 +50,19 @@ pub struct DiscoveredCharger {
     pub peripheral: Peripheral,
 }
 
+/// Frame builders (associated functions, always available) and, with the `ble` feature, the
+/// Bluetooth LE connection to one charger.
 #[derive(Debug, Clone)]
 pub struct Protocol {
+    #[cfg(feature = "ble")]
     peripheral: Option<Peripheral>,
+    #[cfg(feature = "ble")]
     service_uuid: Option<Uuid>,
+    #[cfg(feature = "ble")]
     command_char: Option<Uuid>,
+    #[cfg(feature = "ble")]
     response_char: Option<Uuid>,
+    #[cfg(feature = "ble")]
     notify_char: Option<Uuid>,
 }
 
@@ -334,12 +350,24 @@ impl Default for Protocol {
 impl Protocol {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "ble")]
             peripheral: None,
+            #[cfg(feature = "ble")]
             service_uuid: None,
+            #[cfg(feature = "ble")]
             command_char: None,
+            #[cfg(feature = "ble")]
             response_char: None,
+            #[cfg(feature = "ble")]
             notify_char: None,
         }
+    }
+
+    /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
+    pub(crate) fn name_suffix(name: &str) -> Option<String> {
+        let suffix = name.rsplit(['-', '_', ' ']).next()?;
+        (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| suffix.to_ascii_uppercase())
     }
 
     /// Calculate sum checksum for MC5000 protocol packets (sum of all bytes mod 256)
@@ -584,6 +612,10 @@ impl Protocol {
         Ok(Self::build_packet(CMD_CHARGE_CONFIG, &data))
     }
 
+}
+
+#[cfg(feature = "ble")]
+impl Protocol {
     /// Scan for available Bluetooth devices
     pub async fn scan_devices(timeout_secs: u64) -> Result<Vec<DiscoveredCharger>, Error> {
         let manager = Manager::new().await?;
@@ -612,7 +644,7 @@ impl Protocol {
             if let Some(properties) = properties {
                 let name = properties.local_name.clone().unwrap_or_else(|| "Unknown Device".to_string());
                 let address = properties.address.to_string();
-                let is_mc5000 = Self::is_mc5000_device(&name, &properties.address);
+                let is_mc5000 = Self::is_mc5000_device(&name);
                 devices.push(DiscoveredCharger {
                     id: peripheral.id().to_string(),
                     name: name.clone(),
@@ -654,7 +686,7 @@ impl Protocol {
                         let name = properties.local_name.clone()
                             .unwrap_or_else(|| "Unknown Device".to_string());
                         let address = properties.address.to_string();
-                        let is_mc5000 = Self::is_mc5000_device(&name, &properties.address);
+                        let is_mc5000 = Self::is_mc5000_device(&name);
                         found = Some(DiscoveredCharger {
                             id: peripheral.id().to_string(),
                             name,
@@ -681,20 +713,13 @@ impl Protocol {
     /// The charger does not advertise its service UUID, so the name is all there is.
     /// Units advertise as `#Charger-XXXX` (some stacks drop the `#`), where `XXXX` is
     /// the end of the unit's own address.
-    fn is_mc5000_device(name: &str, _properties: &btleplug::api::BDAddr) -> bool {
+    fn is_mc5000_device(name: &str) -> bool {
         let name_lower = name.to_lowercase();
         name_lower.contains("mc5000")
             || name_lower.contains("skyrc")
             || name_lower.contains("telinkse")
             || name_lower.starts_with("#charger")
             || (name_lower.starts_with("charger") && Self::name_suffix(name).is_some())
-    }
-
-    /// The 4-hex-digit unit suffix of an advertised name such as `#Charger-E56A`.
-    pub(crate) fn name_suffix(name: &str) -> Option<String> {
-        let suffix = name.rsplit(['-', '_', ' ']).next()?;
-        (suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
-            .then(|| suffix.to_ascii_uppercase())
     }
 
     /// Connect to a specific MC5000 device (with full init sequence)
@@ -1821,14 +1846,14 @@ mod tests {
         assert_eq!(Protocol::name_suffix("Charger-XYZ1"), None);
     }
 
+    #[cfg(feature = "ble")]
     #[test]
     fn detects_chargers_by_name_regardless_of_unit_id() {
-        let addr = btleplug::api::BDAddr::default();
         for name in ["#Charger-FF34", "#Charger-E56A", "Charger-E56A", "SkyRC MC5000"] {
-            assert!(Protocol::is_mc5000_device(name, &addr), "{name}");
+            assert!(Protocol::is_mc5000_device(name), "{name}");
         }
         for name in ["Charger", "Phone Charger", "43\" Crystal UHD"] {
-            assert!(!Protocol::is_mc5000_device(name, &addr), "{name}");
+            assert!(!Protocol::is_mc5000_device(name), "{name}");
         }
     }
 

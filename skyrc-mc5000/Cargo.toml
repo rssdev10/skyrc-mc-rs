@@ -13,14 +13,27 @@ keywords = ["skyrc", "mc5000", "charger", "battery", "bluetooth"]
 categories = ["hardware-support"]
 include = ["src/**/*.rs", "examples/**/*.rs", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
 
+[features]
+default = ["ble"]
+# Bluetooth LE: scanning, `BleTransport` and `Session::connect`. Without it the crate still
+# has the frames, `Session` on any `Transport`, and the charging rules.
+ble = ["dep:btleplug", "dep:uuid"]
+
 [dependencies]
 # Only what the library uses; applications bring their own runtime.
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 thiserror = { workspace = true }
 log = { workspace = true }
-btleplug = { workspace = true }
+btleplug = { workspace = true, optional = true }
 futures = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "status"
+required-features = ["ble"]
+
+[package.metadata.docs.rs]
+all-features = true

@@ -54,6 +54,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Library without Bluetooth
+        run: |
+          cargo clippy -p skyrc-mc5000 --all-targets --no-default-features -- -D warnings
+          cargo test -p skyrc-mc5000 --no-default-features
+
       # The library is published on crates.io; check what docs.rs and crates.io would get.
       - name: Library docs
         run: cargo doc -p skyrc-mc5000 --no-deps

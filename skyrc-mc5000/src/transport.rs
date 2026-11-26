@@ -8,12 +8,18 @@
 //! - [`SerialTransport`]: placeholder for a wired (USB serial) link, to be implemented once
 //!   that protocol is known. Opening one fails; it never fakes a connection.
 
-use crate::bluetooth::{Error, DiscoveredCharger, Protocol};
+use crate::bluetooth::Error;
+#[cfg(feature = "ble")]
+use crate::bluetooth::{DiscoveredCharger, Protocol};
+#[cfg(feature = "ble")]
 use crate::session::ConnectMode;
+#[cfg(feature = "ble")]
 use btleplug::api::Peripheral as _;
+#[cfg(feature = "ble")]
 use btleplug::platform::Peripheral;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+#[cfg(feature = "ble")]
 use futures::StreamExt;
 
 /// Raw bytes as they arrive from the link. Chunks need not align with frames.
@@ -31,12 +37,14 @@ pub trait Transport: Send + Sync + 'static {
     fn disconnect(&self) -> BoxFuture<'_, Result<(), Error>>;
 }
 
-/// Bluetooth LE link, through btleplug.
+/// Bluetooth LE link, through btleplug (feature `ble`).
+#[cfg(feature = "ble")]
 pub struct BleTransport {
     protocol: Protocol,
     peripheral: Peripheral,
 }
 
+#[cfg(feature = "ble")]
 impl BleTransport {
     /// Connects (BLE link, service discovery, handshake and, for [`ConnectMode::Control`],
     /// the init sequence) and subscribes to notifications. One attempt, no timeout:
@@ -63,6 +71,7 @@ impl BleTransport {
     }
 }
 
+#[cfg(feature = "ble")]
 impl Transport for BleTransport {
     fn write<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(self.protocol.send_command(packet))

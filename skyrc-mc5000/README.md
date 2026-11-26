@@ -12,6 +12,10 @@ Not affiliated with or endorsed by SkyRC.
   and an in-memory transport is enough for tests.
 - `charging`: the chemistry detection and current rules used by the companion apps.
 
+Cargo feature `ble` (default) brings Bluetooth LE through `btleplug`. With
+`default-features = false` the crate builds without a Bluetooth stack and keeps the frames,
+`Session` on your own `Transport`, and the charging rules.
+
 Verified against a real MC5000 with firmware 1.83. The full protocol description, with the
 evidence for each field, is in
 [docs/PROTOCOL.md](https://github.com/rssdev10/skyrc-mc-rs/blob/main/docs/PROTOCOL.md).
@@ -44,6 +48,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Session::start_slots` and `Session::stop_slots` program and stop slots.
+
+## Using local sources
+
+To try changes to this crate in another project before they are published, point the
+dependency at a checkout:
+
+```toml
+[dependencies]
+skyrc-mc5000 = { path = "../skyrc-mc-rs/skyrc-mc5000" }
+```
+
+or keep the crates.io dependency and override it in the project's `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+skyrc-mc5000 = { path = "../skyrc-mc-rs/skyrc-mc5000" }
+```
 
 ## Safety
 

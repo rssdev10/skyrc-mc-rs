@@ -15,11 +15,16 @@
 //! never interleaves with a start/stop sequence.
 
 use crate::bluetooth::{
-    Error, ChargeConfig, DiscoveredCharger, HistoryPage, DeviceInfo,
+    Error, ChargeConfig, HistoryPage, DeviceInfo,
     Protocol, SlotStatus, SystemSettings, StartStopAction, VoltageHistory,
     CMD_VOLTAGE_HISTORY,
 };
-use crate::transport::{BleTransport, IncomingBytes, Transport};
+#[cfg(feature = "ble")]
+use crate::bluetooth::DiscoveredCharger;
+#[cfg(feature = "ble")]
+use crate::transport::BleTransport;
+use crate::transport::{IncomingBytes, Transport};
+#[cfg(feature = "ble")]
 use btleplug::api::Peripheral as _;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -41,10 +46,13 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MAX_WRITE_TIMEOUTS: u32 = 2;
 /// While polling, a link that delivers nothing for this long is declared lost.
 pub const LINK_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(feature = "ble")]
 /// Time allowed for one connection attempt: BLE link, service discovery, handshake, init.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "ble")]
 /// How long [`Session::connect`] scans for a charger whose handle no longer works.
 pub const RESCAN_TIMEOUT_SECS: u64 = 5;
+#[cfg(feature = "ble")]
 /// Connection attempts before giving up. The link is torn down between attempts.
 pub const CONNECT_ATTEMPTS: u32 = 2;
 
@@ -283,6 +291,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Latest status per slot (index 0 = slot 1) and when it arrived.
 type LatestStatus = [Option<(SlotStatus, Instant)>; 4];
 
+#[cfg(feature = "ble")]
 impl Session {
     /// Scans for `timeout_secs` and returns the MC5000 chargers found.
     pub async fn scan(timeout_secs: u64) -> Result<Vec<DiscoveredCharger>, Error> {
@@ -347,6 +356,9 @@ impl Session {
         }
         Err(last_error.unwrap_or_else(|| Error::ConnectionFailed("Not attempted".into())))
     }
+}
+
+impl Session {
 
     /// Starts a session on an already connected transport. `incoming` carries the raw
     /// bytes the charger sends; `name` and `id` identify it. This is how any link type,

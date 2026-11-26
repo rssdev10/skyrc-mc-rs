@@ -10,6 +10,9 @@
 //! Voltage alone cannot tell several chemistries apart, so detection only commits where it
 //! is unambiguous and never picks a chemistry whose target voltage could overcharge a
 //! lower-voltage cell: Li-Ion HV is never chosen.
+//!
+//! These are this project's rules, chosen for the MC5000 and checked on real cells; they are
+//! not SkyRC's. The charger's own cut-offs still apply to every program.
 
 use crate::bluetooth::BatteryChemistry;
 
